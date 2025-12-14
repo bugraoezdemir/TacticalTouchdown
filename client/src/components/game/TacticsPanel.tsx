@@ -54,7 +54,7 @@ export default function TacticsPanel() {
         <div className="space-y-3">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Formation</Label>
           <div className="grid grid-cols-2 gap-2">
-            {tactics.availableFormations.map((formation) => (
+            {(tactics.availableFormations || ['4-4-2', '4-3-3', '3-5-2', '5-3-2']).map((formation) => (
               <Button
                 key={formation}
                 variant="outline"
@@ -75,7 +75,7 @@ export default function TacticsPanel() {
         <div className="space-y-3">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Mentality</Label>
           <div className="grid grid-cols-3 gap-2">
-            {tactics.availableMentalities.map((mentality) => (
+            {(tactics.availableMentalities || ['defensive', 'normal', 'offensive']).map((mentality) => (
               <Button
                 key={mentality}
                 variant="outline"
@@ -100,12 +100,12 @@ export default function TacticsPanel() {
                 <Users className="w-4 h-4 text-yellow-400" /> Dribbling
               </Label>
               <span className="text-xs text-muted-foreground" data-testid="text-dribble-value">
-                {tactics.dribbleFrequency < 0.8 ? 'Low' : tactics.dribbleFrequency > 1.2 ? 'High' : 'Normal'}
+                {(tactics.dribbleFrequency ?? 1.0) < 0.8 ? 'Low' : (tactics.dribbleFrequency ?? 1.0) > 1.2 ? 'High' : 'Normal'}
               </span>
             </div>
             <Slider
               data-testid="slider-dribble"
-              value={[tactics.dribbleFrequency]}
+              value={[tactics.dribbleFrequency ?? 1.0]}
               onValueChange={handleDribbleChange}
               min={0.5}
               max={2.0}
@@ -120,12 +120,12 @@ export default function TacticsPanel() {
                 <Target className="w-4 h-4 text-green-400" /> Shooting
               </Label>
               <span className="text-xs text-muted-foreground" data-testid="text-shoot-value">
-                {tactics.shootFrequency < 0.8 ? 'Low' : tactics.shootFrequency > 1.2 ? 'High' : 'Normal'}
+                {(tactics.shootFrequency ?? 1.0) < 0.8 ? 'Low' : (tactics.shootFrequency ?? 1.0) > 1.2 ? 'High' : 'Normal'}
               </span>
             </div>
             <Slider
               data-testid="slider-shoot"
-              value={[tactics.shootFrequency]}
+              value={[tactics.shootFrequency ?? 1.0]}
               onValueChange={handleShootChange}
               min={0.5}
               max={2.0}
