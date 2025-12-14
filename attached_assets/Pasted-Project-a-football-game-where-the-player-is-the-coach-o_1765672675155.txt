@@ -1,0 +1,17 @@
+Project: a football game, where the player is the coach of a football team. Coach rules the team through the league and determines the tactics and strategy for each game. 
+
+Structure of the package
+
+Graphical part of the game: the pitch is a numpy array. Players are individual dots on the array. The ball is also another dot. The movements are reflected on this array, which is then rendered and displayed.
+
+Game backend: the core part of the game.
+
+There is a Player class. All players of the match game, except goalkeepers, are instances of this class. This is an extensive class with a wide range of methods. One method is make_decision, which decides on the action of the player. There are different groups of possible decisions for players with ball and players without ball. Players with ball can decide on 1) dribble, 2) pass, 3) shoot. Players without ball divide into two groups: players whose teammates have the ball can decide on 1) make defensive run, 2) make offensive run. Players whose teammates do not have the ball can decide on 1) defend zone, 2) man mark. The Player class has also methods to carry out all these actions. Player class has attributes such as position and direction. The player movement is determined by these coordinate attributes. 
+
+There is also a Ball class. It controls the ball's actions. It also has position and direction attributes.
+
+There is a Goalkeeper class. Goalkeepers are instances of this class.
+
+There is also a Game class. This class has the method iterate. This controls the time interval of the game. At each iteration, each player makes a decision. Then these decisions are executed in parallel. A typical decision determines the new directions of the players.
+
+Now let's define some concepts. Owning ball means being closer to the ball than a defined threshold distance. If a player owns the ball, the player can give the ball direction and initial speed. In the next iterations, the ball will move accordingly. The actions pass, shoot and dribble all mean giving ball direction and initial speed, just at different rates.
