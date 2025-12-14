@@ -313,22 +313,34 @@ class Player:
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
         
-        # Prioritize shooting when there's a clear opportunity
-        if shoot_score > SHOOT_SCORE_THRESHOLD and shoot_score >= pass_score * 0.8:
-            # Shoot if it's a decent shot and at least 80% as good as best pass
-            self._execute_shoot(ctx, game)
-        elif pass_score > PASS_SCORE_THRESHOLD and pass_score > dribble_score and pass_option is not None:
-            # Only pass if it's a good forward pass
-            self._execute_pass(ctx, game, pass_option, pass_target)
-        elif dribble_score > 0.2:
-            # Dribble forward if space available
-            self._execute_dribble(ctx, game, dribble_dir)
-        elif shoot_score > 0.1:
-            # Try a shot even if not ideal
-            self._execute_shoot(ctx, game)
+        # Attackers in shooting range should prefer dribble/shoot unless pass is very safe
+        in_shooting_range = ctx.dist_to_goal < 30.0
+        is_attacker = self.role in ['FWD', 'MID']
+        
+        if in_shooting_range and is_attacker:
+            # In attacking zone: shoot > dribble > very safe pass
+            if shoot_score > SHOOT_SCORE_THRESHOLD:
+                self._execute_shoot(ctx, game)
+            elif dribble_score > 0.3:
+                self._execute_dribble(ctx, game, dribble_dir)
+            elif pass_score > 0.6 and pass_option is not None:  # Only very safe passes
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            elif shoot_score > 0.1:
+                self._execute_shoot(ctx, game)
+            else:
+                self._execute_dribble(ctx, game, dribble_dir)
         else:
-            # Default to dribble
-            self._execute_dribble(ctx, game, dribble_dir)
+            # Normal decision making outside shooting range
+            if shoot_score > SHOOT_SCORE_THRESHOLD and shoot_score >= pass_score * 0.8:
+                self._execute_shoot(ctx, game)
+            elif pass_score > PASS_SCORE_THRESHOLD and pass_score > dribble_score and pass_option is not None:
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            elif dribble_score > 0.2:
+                self._execute_dribble(ctx, game, dribble_dir)
+            elif shoot_score > 0.1:
+                self._execute_shoot(ctx, game)
+            else:
+                self._execute_dribble(ctx, game, dribble_dir)
 
     def _evaluate_shoot(self, ctx):
         """Evaluate shooting option. Returns score 0-1."""
@@ -588,6 +600,11 @@ class Player:
             # Check if ball is in our zone
             ball_in_zone = self._is_in_zone(game.ball.pos)
             
+            # Check if ball is near our own goal (defenders must chase)
+            own_goal_x = 0.0 if self.team == 'home' else 100.0
+            ball_dist_to_own_goal = abs(game.ball.pos[0] - own_goal_x)
+            ball_near_own_goal = ball_dist_to_own_goal < 30.0
+            
             # Check if we're one of the closest teammates
             closer_teammates = sum(1 for t in ctx.teammates 
                                    if np.linalg.norm(t.pos - game.ball.pos) < my_dist - 3.0)
@@ -602,6 +619,9 @@ class Player:
             should_chase = False
             if my_dist < 8.0:  # Very close - always chase
                 should_chase = True
+            elif ball_near_own_goal and self.role == 'DEF' and my_dist < 25.0:
+                # Defenders MUST chase when ball is near own goal
+                should_chase = True
             elif ball_in_zone and closer_teammates == 0:  # In our zone and we're closest teammate
                 should_chase = True
             elif my_dist < closest_opp_dist and closer_teammates == 0:  # We can get there before opponent
@@ -609,7 +629,11 @@ class Player:
             
             if should_chase:
                 if my_dist > 1.0:
-                    chase_target = self._clamp_to_zone(game.ball.pos)
+                    # Defenders near own goal chase directly, others respect zone
+                    if ball_near_own_goal and self.role == 'DEF':
+                        chase_target = game.ball.pos  # Chase directly
+                    else:
+                        chase_target = self._clamp_to_zone(game.ball.pos)
                     to_target = chase_target - self.pos
                     self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
                 else:
@@ -887,6 +911,9 @@ class Game:
         if np.linalg.norm(self.ball.vel) < 0.05:
             self.ball.vel = np.zeros(2)
         
+        # Check for goalkeeper saves before detecting goals
+        self._check_goalkeeper_save()
+        
         # Detect ball events (out of bounds, goals)
         event = self._detect_ball_event()
         if event is not None:
@@ -957,6 +984,95 @@ class Game:
             return 'throw_in_home'  # Default
         
         return None
+
+    def _check_goalkeeper_save(self):
+        """Check if a goalkeeper can save an incoming shot."""
+        ball_speed = np.linalg.norm(self.ball.vel)
+        
+        # Only check saves for fast-moving balls (shots)
+        if ball_speed < 1.5:
+            return
+        
+        # Don't attempt saves if ball already crossed goal line
+        if self.ball.pos[0] <= 0 or self.ball.pos[0] >= 100:
+            return
+        
+        # Check each goalkeeper
+        for p in self.players:
+            if p.role != 'GK':
+                continue
+            
+            # Calculate distance to ball
+            dist_to_ball = np.linalg.norm(p.pos - self.ball.pos)
+            
+            # GK can only save if ball is close
+            if dist_to_ball > 5.0:
+                continue
+            
+            # Check if ball is heading toward GK's goal
+            if p.team == 'home':
+                if self.ball.vel[0] > 0:  # Ball going away from home goal
+                    continue
+            else:
+                if self.ball.vel[0] < 0:  # Ball going away from away goal
+                    continue
+            
+            # Calculate save difficulty based on:
+            # 1. Ball speed (faster = harder to save)
+            # 2. Distance from GK (closer = easier)
+            # 3. Shot placement (corners harder to save)
+            
+            # Speed difficulty: faster shots are harder
+            speed_difficulty = min(ball_speed / 3.0, 1.0)
+            
+            # Distance factor: closer is easier to save
+            distance_factor = 1.0 - (dist_to_ball / 5.0)
+            
+            # Corner difficulty: shots toward goal corners are harder
+            goal_y_center = 50.0
+            ball_y_offset = abs(self.ball.pos[1] - goal_y_center)
+            corner_difficulty = ball_y_offset / 10.0  # Max 1.0 at edges
+            
+            # Calculate save probability
+            base_save_chance = 0.7  # GK is generally good
+            save_chance = base_save_chance * distance_factor * (1.0 - speed_difficulty * 0.5) * (1.0 - corner_difficulty * 0.4)
+            save_chance = max(0.1, min(0.9, save_chance))  # Clamp between 10% and 90%
+            
+            # Roll for save
+            if random.random() < save_chance:
+                # SAVE! Determine if catch or deflect
+                if ball_speed < 2.0 and distance_factor > 0.7:
+                    # Catch the ball - GK gets possession
+                    self.ball.vel = np.zeros(2)
+                    self.ball.pos = p.pos.copy()
+                    self.ball.owner_id = p.id
+                    p.has_ball = True
+                    self.last_touch = LastTouch(team=p.team, player_id=p.id)
+                else:
+                    # Deflect - reflect ball velocity off goal plane with safety margins
+                    if p.team == 'home':
+                        # Home GK: reflect x-velocity to positive (away from x=0)
+                        deflect_x = abs(self.ball.vel[0]) if self.ball.vel[0] != 0 else 1.0
+                        safe_x = 8.0  # Safe distance from goal line
+                    else:
+                        # Away GK: reflect x-velocity to negative (away from x=100)
+                        deflect_x = -abs(self.ball.vel[0]) if self.ball.vel[0] != 0 else -1.0
+                        safe_x = 92.0  # Safe distance from goal line
+                    
+                    # Add randomness to y-component for varied deflection angles
+                    deflect_y = self.ball.vel[1] * 0.5 + (random.random() - 0.5) * 1.5
+                    deflect_dir = normalize(np.array([deflect_x, deflect_y]))
+                    
+                    # Set new velocity (slower after deflection)
+                    self.ball.vel = deflect_dir * ball_speed * 0.4
+                    
+                    # Force ball position to safe zone away from goal
+                    new_pos = np.array([safe_x, p.pos[1] + deflect_y * 2.0])
+                    new_pos[1] = np.clip(new_pos[1], 10.0, 90.0)  # Keep well in bounds
+                    self.ball.pos = new_pos
+                    
+                    self.last_touch = LastTouch(team=p.team, player_id=p.id)
+                break  # Only one GK can save
 
     def _transition_state(self, event):
         """Transition game state based on event."""
