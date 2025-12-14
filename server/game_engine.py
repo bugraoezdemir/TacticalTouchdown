@@ -1096,6 +1096,11 @@ class Game:
             player.home_pos = np.array([float(new_x), float(y)])
             player.zone_weight = ZONE_WEIGHT_BY_ROLE.get(role, 0.5)
             
+            # Immediately move player toward new home position (smooth transition)
+            # Players without ball teleport instantly for better responsiveness
+            if not player.has_ball:
+                player.pos = player.home_pos.copy()
+            
             # Update zone bounds
             role_key = (lat, lon, team)
             if role_key in ROLE_ZONE_BOUNDS:

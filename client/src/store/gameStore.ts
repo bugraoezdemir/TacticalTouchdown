@@ -69,6 +69,8 @@ const defaultTactics: Tactics = {
   availableMentalities: ['defensive', 'normal', 'offensive'],
 };
 
+let tickInProgress = false;
+
 export const useGameStore = create<GameStore>((set, get) => ({
   players: [],
   ball: { x: 50, y: 50, vx: 0, vy: 0, ownerId: null },
@@ -105,6 +107,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   tick: async () => {
+      if (tickInProgress) return;
+      tickInProgress = true;
       try {
           const res = await fetch('/api/tick', { method: 'POST' });
           const data = await res.json();
@@ -119,6 +123,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
           });
       } catch (e) {
           console.error("Failed to tick game:", e);
+      } finally {
+          tickInProgress = false;
       }
   },
 
