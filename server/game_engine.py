@@ -411,14 +411,22 @@ class Player:
                     ball_owner = p
                     break
         
-        # Calculate tactical target
+        # When ball is loose, chase it directly (no blending)
+        if ball_owner is None:
+            to_ball = game.ball.pos - self.pos
+            dist = np.linalg.norm(to_ball)
+            if dist > 1.0:
+                self.vel = normalize(to_ball) * PLAYER_SPRINT_SPEED
+            else:
+                self.vel = np.zeros(2)
+            return
+        
+        # Calculate tactical target when ball is owned
         tactical_target = None
-        if ball_owner is not None and ball_owner.team == self.team:
+        if ball_owner.team == self.team:
             tactical_target = self._get_support_target(ctx, ball_owner)
-        elif ball_owner is not None and ball_owner.team != self.team:
-            tactical_target = self._get_defend_target(ctx, ball_owner)
         else:
-            tactical_target = game.ball.pos.copy()
+            tactical_target = self._get_defend_target(ctx, ball_owner)
         
         # Blend tactical target with home position (70% tactical, 30% home)
         if tactical_target is not None:
@@ -431,8 +439,7 @@ class Player:
         dist = np.linalg.norm(to_target)
         
         if dist > 2.0:
-            speed = PLAYER_SPRINT_SPEED if ball_owner is None else PLAYER_SPEED
-            self.vel = normalize(to_target) * speed
+            self.vel = normalize(to_target) * PLAYER_SPEED
         else:
             self.vel = np.zeros(2)
 
