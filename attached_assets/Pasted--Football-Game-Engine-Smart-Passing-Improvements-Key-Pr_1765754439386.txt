@@ -1,0 +1,251 @@
+# Football Game Engine - Smart Passing Improvements
+
+## Key Problems Identified
+
+1. **No Vision System** - Players can "see" everywhere, leading to unrealistic 360° passes
+2. **Weak Interception Checks** - `time_margin < 0.5` is too lenient
+3. **Poor Receiver Safety** - 8-unit radius with partial penalties allows risky passes
+4. **Disabled Space Evaluation** - `SPACE_PASS_BONUS = 0.0` removes intelligent positioning
+5. **Weak Back Pass Penalty** - Only 0.05 penalty doesn't prevent stupid backwards passes
+6. **No Passing Lane Analysis** - Doesn't check if corridors are actually clear
+
+## Recommended Code Changes
+
+### 1. Add Vision System (NEW)
+
+```python
+# Add to constants
+VISION_ANGLE = 140.0  # Degrees - realistic peripheral vision
+VISION_DISTANCE = 50.0  # Can see teammates this far ahead
+BACK_VISION_DISTANCE = 25.0  # Limited rear vision
+
+def is_in_vision_cone(observer_pos, observer_facing, target_pos, 
+                      max_angle=VISION_ANGLE, max_distance=VISION_DISTANCE):
+    """Check if target is within observer's vision cone."""
+    to_target = target_pos - observer_pos
+    dist = np.linalg.norm(to_target)
+    
+    if dist < 1e-6 or dist > max_distance:
+        return False, dist, 180.0
+    
+    to_target_normalized = to_target / dist
+    angle = math.degrees(math.acos(np.clip(
+        np.dot(observer_facing, to_target_normalized), -1.0, 1.0)))
+    
+    return angle <= max_angle / 2.0, dist, angle
+```
+
+### 2. Add Passing Lane Quality Check (NEW)
+
+```python
+def calculate_passing_lane_quality(passer_pos, target_pos, opponents):
+    """Calculate quality of passing lane - 0 (blocked) to 1 (clear)."""
+    corridor_width = 3.0
+    blocking_opponents = 0
+    
+    for opp_pos in opponents:
+        dist_to_line = distance_point_to_segment(opp_pos, passer_pos, target_pos)
+        to_opp = opp_pos - passer_pos
+        pass_vec = target_pos - passer_pos
+        proj = np.dot(to_opp, pass_vec) / np.linalg.norm(pass_vec)
+        
+        # Opponent is blocking if in corridor and along path
+        if 0 < proj < np.linalg.norm(pass_vec) and dist_to_line < corridor_width:
+            blocking_opponents += 1
+    
+    if blocking_opponents == 0:
+        return 1.0
+    
+    return max(0.0, 1.0 / (1.0 + blocking_opponents * 0.5))
+```
+
+### 3. Update DecisionContext to Include Facing Direction
+
+```python
+class DecisionContext:
+    def __init__(self, player, game):
+        # ... existing code ...
+        
+        # NEW: Calculate facing direction for vision
+        if np.linalg.norm(player.vel) > 0.1:
+            self.facing = normalize(player.vel)
+        else:
+            self.facing = normalize(self.goal_center - player.pos)
+```
+
+### 4. Improve _evaluate_pass() Method
+
+```python
+def _evaluate_pass(self, ctx):
+    """IMPROVED: Check vision before evaluating passes."""
+    best_teammate = None
+    best_target = None
+    best_score = 0.0
+    
+    for teammate in ctx.teammates:
+        if teammate.role == 'GK' and ctx.dist_to_goal < 60:
+            continue
+        
+        # NEW: Check if teammate is in vision
+        in_vision, dist, angle = is_in_vision_cone(
+            self.pos, ctx.facing, teammate.pos
+        )
+        
+        # Penalize passes outside vision
+        vision_penalty = 0.0
+        if not in_vision:
+            if dist > 15.0:
+                vision_penalty = 0.3  # Heavy penalty for blind long passes
+            else:
+                vision_penalty = 0.15  # Moderate for short blind passes
+        
+        # Evaluate pass
+        score = self._evaluate_pass_to_target(ctx, teammate.pos, teammate)
+        score -= vision_penalty
+        
+        # NEW: Consider lead passes for moving teammates
+        teammate_speed = np.linalg.norm(teammate.vel)
+        if teammate_speed > 0.2:
+            lead_target = teammate.pos + normalize(teammate.vel) * 8.0
+            in_vision_lead, _, _ = is_in_vision_cone(
+                self.pos, ctx.facing, lead_target
+            )
+            
+            if in_vision_lead:
+                lead_score = self._evaluate_pass_to_target(ctx, lead_target, teammate)
+                lead_score += 0.15  # Bonus for space pass
+                if lead_score > score:
+                    score = lead_score
+                    target = lead_target
+                else:
+                    target = teammate.pos
+            else:
+                target = teammate.pos
+        else:
+            target = teammate.pos
+        
+        if score > best_score:
+            best_score = score
+            best_teammate = teammate
+            best_target = target
+    
+    return best_teammate, best_target, best_score
+```
+
+### 5. Stricter _evaluate_pass_to_target()
+
+```python
+def _evaluate_pass_to_target(self, ctx, target_pos, teammate):
+    """IMPROVED: Much stricter safety and interception checks."""
+    pass_vec = target_pos - self.pos
+    pass_dist = np.linalg.norm(pass_vec)
+    
+    if pass_dist < 0.5 or pass_dist > 50.0:
+        return 0.0
+    
+    # STRONGER back pass penalty
+    my_goal_dist = ctx.dist_to_goal
+    target_goal_dist = distance_to_goal(target_pos, ctx.team)
+    is_back_pass = target_goal_dist > my_goal_dist + 5.0
+    back_pass_penalty = 0.25 if is_back_pass else 0.0  # Was 0.05
+    
+    # NEW: Check passing lane quality
+    lane_quality = calculate_passing_lane_quality(
+        self.pos, target_pos, ctx.opponent_positions
+    )
+    
+    if lane_quality < 0.3:  # Lane too blocked
+        return 0.0
+    
+    # STRICTER interception check - time_margin threshold reduced
+    interception_risk = 0.0
+    for opp_pos in ctx.opponent_positions:
+        closest = project_point_to_segment(opp_pos, self.pos, target_pos)
+        dist_to_path = np.linalg.norm(opp_pos - closest)
+        dist_along = np.linalg.norm(closest - self.pos)
+        
+        time_ball = dist_along / BALL_PASS_SPEED
+        time_opp = dist_to_path / PLAYER_SPRINT_SPEED
+        time_margin = time_ball - time_opp
+        
+        # STRICTER: Changed from 0.5 to 1.0
+        if time_margin < 1.0:
+            risk = max(0.0, min(1.0, 1.0 - time_margin))
+            interception_risk = max(interception_risk, risk)
+    
+    # STRICTER receiver safety - count all nearby opponents
+    receiver_danger = 0.0
+    nearby_count = 0
+    for opp_pos in ctx.opponent_positions:
+        dist = np.linalg.norm(opp_pos - target_pos)
+        if dist < 10.0:  # Increased radius
+            nearby_count += 1
+            receiver_danger += (1.0 - dist / 10.0) * 0.4
+    
+    # Heavy penalty for crowded areas
+    if nearby_count >= 3:
+        receiver_danger += 0.5
+    
+    receiver_safety = max(0.0, 1.0 - receiver_danger)
+    
+    # DEFENDERS REFUSE dangerous passes
+    if self.role == 'DEF' and (interception_risk > 0.3 or receiver_safety < 0.6):
+        return 0.0
+    if self.role == 'GK' and (interception_risk > 0.2 or receiver_safety < 0.7):
+        return 0.0
+    
+    # Safety must be high for pass to be considered
+    path_safety = max(0.0, 1.0 - interception_risk)
+    combined_safety = path_safety * receiver_safety * lane_quality
+    
+    if combined_safety < 0.4:  # Reject unsafe passes
+        return 0.0
+    
+    # Calculate final score
+    progress_factor = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
+    progress_factor = float(np.clip(progress_factor, 0, 1))
+    
+    dist_factor = 1.0 if pass_dist < 25.0 else max(0.3, 1.0 - (pass_dist - 25.0) / 25.0)
+    
+    score = (
+        0.65 * combined_safety +      # Safety is critical (was 0.60)
+        0.20 * progress_factor +      # Progress matters less
+        0.15 * dist_factor -          # Distance factor
+        back_pass_penalty             # Strong back pass penalty
+    )
+    
+    return max(0.0, score)
+```
+
+### 6. Update Constants
+
+```python
+# Update these at the top
+PASS_SAFETY_WEIGHT = 0.6       # Was 0.5
+PASS_GOAL_PROGRESS_WEIGHT = 0.3 # Was 0.4
+SPACE_PASS_BONUS = 0.15  # Was 0.0 - re-enable
+
+PASS_SCORE_THRESHOLD = 0.25   # Was 0.15 - stricter
+```
+
+## Summary of Improvements
+
+✅ **Vision System** - Players only pass to teammates they can "see"  
+✅ **Passing Lane Analysis** - Checks if corridor is actually clear  
+✅ **Stricter Interception** - Changed threshold from 0.5 to 1.0 time units  
+✅ **Better Receiver Safety** - Larger radius (10 units), counts all nearby opponents  
+✅ **Stronger Back Pass Penalty** - 0.25 instead of 0.05  
+✅ **Role-Based Refusal** - Defenders/GK refuse dangerous passes completely  
+✅ **Lead Passes** - Re-enabled space passes with bonus scoring  
+✅ **Combined Safety Metric** - Path × Receiver × Lane must all be good
+
+## Expected Results
+
+- **Fewer interceptions** - Players won't pass into opponent-blocked lanes
+- **Better spacing** - Re-enabled space passes reward positioning
+- **More forward passes** - Stronger back pass penalties
+- **Smarter defenders** - Won't attempt risky passes from own half
+- **Realistic vision** - No more impossible 360° blind passes
+- **Fluid build-up** - Lead passes to moving teammates
+
+These changes should significantly reduce "stupid passes right into opponents" while maintaining fluid, attacking play.
