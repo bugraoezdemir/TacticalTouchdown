@@ -698,17 +698,56 @@ class Player:
         game.ball.vel = direction * BALL_DRIBBLE_SPEED * 1.5  # Ball moves slightly faster than player
     
     def _execute_clearance(self, ctx, game):
-        """Clear the ball upfield away from danger."""
+        """Clear the ball upfield away from danger - evaluate safe directions."""
         self.has_ball = False
         game.ball.owner_id = None
         
-        # Kick toward attacking goal with some randomness
-        target_x = ctx.goal_x
-        target_y = 50.0 + (random.random() - 0.5) * 40  # Random y between 30-70
-        target = np.array([target_x, target_y])
+        # Generate multiple clearance target candidates and pick safest
+        candidates = []
+        goal_x = ctx.goal_x
         
-        clear_dir = normalize(target - self.pos)
-        game.ball.vel = clear_dir * BALL_SHOOT_SPEED  # Use shoot speed for power
+        # Wide range of target Y positions
+        for target_y in [20.0, 35.0, 50.0, 65.0, 80.0]:
+            target = np.array([goal_x, target_y])
+            candidates.append(target)
+            # Also add shorter clearances (safer, less distance)
+            mid_x = self.pos[0] + (goal_x - self.pos[0]) * 0.5
+            candidates.append(np.array([mid_x, target_y]))
+        
+        # Score each candidate based on opponent proximity to ball path
+        best_target = np.array([goal_x, 50.0])
+        best_score = -999.0
+        
+        for target in candidates:
+            clear_vec = target - self.pos
+            clear_dist = np.linalg.norm(clear_vec)
+            if clear_dist < 10.0:
+                continue
+            
+            # Check safety - how close can opponents get to the ball path?
+            min_time_margin = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                closest_on_path = project_point_to_segment(opp_pos, self.pos, target)
+                dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
+                dist_along_path = np.linalg.norm(closest_on_path - self.pos)
+                
+                time_ball_reaches = dist_along_path / BALL_SHOOT_SPEED
+                time_opp_reaches = dist_to_path / PLAYER_SPRINT_SPEED
+                time_margin = time_ball_reaches - time_opp_reaches
+                min_time_margin = min(min_time_margin, time_margin)
+            
+            # Score: higher time margin = safer, prefer forward progress
+            safety_score = min(min_time_margin, 2.0)  # Cap at 2.0
+            progress_score = (goal_x - self.pos[0]) / 100.0 if self.team == 'home' else (self.pos[0] - goal_x) / 100.0
+            
+            score = safety_score * 2.0 + progress_score + clear_dist / 50.0
+            
+            if score > best_score:
+                best_score = score
+                best_target = target
+        
+        clear_dir = normalize(best_target - self.pos)
+        game.ball.vel = clear_dir * BALL_SHOOT_SPEED
         
         # Track last touch
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
@@ -775,7 +814,32 @@ class Player:
                 else:
                     self.vel = np.zeros(2)
             else:
-                # Return toward home position
+                # Not chasing directly - check if we can intercept a moving ball
+                ball_speed = np.linalg.norm(game.ball.vel)
+                
+                if ball_speed > 0.5 and my_dist < 40.0:
+                    # Ball is moving - calculate intercept point
+                    ball_dir = normalize(game.ball.vel)
+                    
+                    # Project player position onto ball's path to find closest intercept point
+                    ball_future = game.ball.pos + ball_dir * 50.0  # Extended ball path
+                    intercept_point = project_point_to_segment(self.pos, game.ball.pos, ball_future)
+                    
+                    # Check if intercept point is reachable before ball arrives
+                    dist_to_intercept = np.linalg.norm(intercept_point - self.pos)
+                    ball_dist_to_intercept = np.linalg.norm(intercept_point - game.ball.pos)
+                    
+                    time_player = dist_to_intercept / PLAYER_SPRINT_SPEED
+                    time_ball = ball_dist_to_intercept / ball_speed
+                    
+                    # Move to intercept if we can get there in time
+                    if time_player < time_ball + 1.5 and dist_to_intercept > 2.0:
+                        # Move perpendicular toward intercept point
+                        to_intercept = intercept_point - self.pos
+                        self.vel = normalize(to_intercept) * PLAYER_SPRINT_SPEED
+                        return
+                
+                # Default: Return toward home position
                 to_home = self.home_pos - self.pos
                 if np.linalg.norm(to_home) > 2.0:
                     self.vel = normalize(to_home) * PLAYER_SPEED
