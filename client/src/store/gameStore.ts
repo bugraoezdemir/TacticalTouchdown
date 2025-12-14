@@ -70,6 +70,7 @@ const defaultTactics: Tactics = {
 };
 
 let tickInProgress = false;
+let tacticsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useGameStore = create<GameStore>((set, get) => ({
   players: [],
@@ -152,12 +153,24 @@ export const useGameStore = create<GameStore>((set, get) => ({
         tactics: { ...state.tactics, ...updates }
       }));
       
-      fetch('/api/tactics', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates)
-      }).catch((e) => {
-        console.error("Failed to sync tactics:", e);
-      });
+      if (tacticsDebounceTimer) {
+        clearTimeout(tacticsDebounceTimer);
+      }
+      
+      tacticsDebounceTimer = setTimeout(() => {
+        const currentTactics = get().tactics;
+        fetch('/api/tactics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            formation: currentTactics.formation,
+            mentality: currentTactics.mentality,
+            dribbleFrequency: currentTactics.dribbleFrequency,
+            shootFrequency: currentTactics.shootFrequency
+          })
+        }).catch((e) => {
+          console.error("Failed to sync tactics:", e);
+        });
+      }, 150);
   }
 }));
