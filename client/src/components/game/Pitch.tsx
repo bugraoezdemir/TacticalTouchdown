@@ -19,9 +19,6 @@ const PlayerDot = ({ player }: { player: Player }) => {
       transition={{ type: "tween", duration: 0.1, ease: "linear" }}
     >
       {player.number}
-      {player.hasBall && (
-         <div className="absolute -bottom-1 w-1 h-1 bg-white rounded-full animate-ping" />
-      )}
     </motion.div>
   );
 };

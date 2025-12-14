@@ -21,20 +21,24 @@ BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.0
 BALL_FRICTION = 0.95
 
-# Decision weights - lowered thresholds so players pass/shoot more often
-PASS_SAFETY_WEIGHT = 0.4
-PASS_GOAL_PROGRESS_WEIGHT = 0.3
+# Decision weights - increased pass weights so players pass more often
+PASS_SAFETY_WEIGHT = 0.5       # Was 0.4 - value safe passes more
+PASS_GOAL_PROGRESS_WEIGHT = 0.4 # Was 0.3 - value forward progress more
 PASS_DISTANCE_WEIGHT = 0.3
+SPACE_PASS_BONUS = 0.2  # Bonus for passing to space ahead of running teammates
 
-DRIBBLE_CLEARANCE_WEIGHT = 0.5
-DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.5
+DRIBBLE_CLEARANCE_WEIGHT = 0.35  # Reduced - dribble less
+DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.35  # Reduced - favor passing
 
 SHOOT_DISTANCE_THRESHOLD = 35.0  # Increased from 25 - shoot from further
 SHOOT_ANGLE_THRESHOLD = 30.0
 
 # Lowered thresholds for actions
 SHOOT_SCORE_THRESHOLD = 0.25  # Was 0.5 - shoot more often
-PASS_SCORE_THRESHOLD = 0.15   # Was 0.3 - pass more often
+PASS_SCORE_THRESHOLD = 0.10   # Lower threshold - pass more often
+
+# Increased pass appeal, reduced dribble appeal
+PASS_BONUS = 0.15  # Added bonus to pass scores
 
 # Home position attraction weight
 HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
@@ -253,14 +257,14 @@ class Player:
         """Decision making when player has the ball."""
         
         shoot_score = self._evaluate_shoot(ctx)
-        pass_option, pass_score = self._evaluate_pass(ctx)
+        pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
         
         # Choose best action with lowered thresholds
         if shoot_score > pass_score and shoot_score > dribble_score and shoot_score > SHOOT_SCORE_THRESHOLD:
             self._execute_shoot(ctx, game)
         elif pass_score > dribble_score and pass_option is not None and pass_score > PASS_SCORE_THRESHOLD:
-            self._execute_pass(ctx, game, pass_option)
+            self._execute_pass(ctx, game, pass_option, pass_target)
         else:
             self._execute_dribble(ctx, game, dribble_dir)
 
@@ -283,52 +287,93 @@ class Player:
         return distance_factor * block_factor
 
     def _evaluate_pass(self, ctx):
-        """Evaluate passing options. Returns (best_teammate, score)."""
+        """Evaluate passing options. Returns (best_teammate, target_pos, score)."""
         if len(ctx.teammates) == 0:
-            return None, 0.0
+            return None, None, 0.0
         
         best_teammate = None
+        best_target = None
         best_score = 0.0
         
         for teammate in ctx.teammates:
             if teammate.role == 'GK' and ctx.dist_to_goal < 50:
                 continue
             
-            pass_vec = teammate.pos - self.pos
-            pass_dist = np.linalg.norm(pass_vec)
+            # Evaluate direct pass to teammate
+            direct_score = self._evaluate_pass_to_target(ctx, teammate.pos, teammate)
+            direct_target = teammate.pos.copy()
             
-            if pass_dist < 5.0 or pass_dist > 50.0:
-                continue
+            # Evaluate "space pass" - passing ahead of running teammates
+            space_score = 0.0
+            space_target = None
+            if np.linalg.norm(teammate.vel) > 0.2:
+                # Calculate lead position 10-15 units ahead of teammate's run
+                teammate_dir = normalize(teammate.vel)
+                lead_pos = teammate.pos + teammate_dir * 12.0  # 12 units ahead
+                
+                # Make sure lead position is on field and toward goal
+                lead_pos[0] = np.clip(lead_pos[0], 5, 95)
+                lead_pos[1] = np.clip(lead_pos[1], 5, 95)
+                
+                # Check if space pass makes progress toward goal
+                lead_goal_dist = distance_to_goal(lead_pos, ctx.team)
+                if lead_goal_dist < distance_to_goal(teammate.pos, ctx.team):
+                    space_score = self._evaluate_pass_to_target(ctx, lead_pos, teammate) + SPACE_PASS_BONUS
+                    space_target = lead_pos
             
-            safety_score = 1.0
-            for opp_pos in ctx.opponent_positions:
-                can_intercept, time_margin = time_to_intercept(
-                    opp_pos, PLAYER_SPRINT_SPEED,
-                    self.pos, teammate.pos, BALL_PASS_SPEED
-                )
-                if can_intercept:
-                    safety_score *= max(0.1, float(0.5 + time_margin))
-            
-            my_goal_dist = ctx.dist_to_goal
-            teammate_goal_dist = distance_to_goal(teammate.pos, ctx.team)
-            progress_factor = 0.5 + 0.5 * (my_goal_dist - teammate_goal_dist) / max(my_goal_dist, 1)
-            progress_factor = float(np.clip(progress_factor, 0, 1))
-            
-            optimal_dist = 20.0
-            dist_factor = 1.0 - abs(pass_dist - optimal_dist) / 50.0
-            dist_factor = max(0.0, float(dist_factor))
-            
-            score = (
-                PASS_SAFETY_WEIGHT * safety_score +
-                PASS_GOAL_PROGRESS_WEIGHT * progress_factor +
-                PASS_DISTANCE_WEIGHT * dist_factor
-            )
+            # Use the better of direct pass or space pass
+            if space_score > direct_score and space_target is not None:
+                score = space_score
+                target = space_target
+            else:
+                score = direct_score
+                target = direct_target
             
             if score > best_score:
                 best_score = score
                 best_teammate = teammate
+                best_target = target
         
-        return best_teammate, best_score
+        return best_teammate, best_target, best_score
+    
+    def _evaluate_pass_to_target(self, ctx, target_pos, teammate):
+        """Evaluate a pass to a specific target position."""
+        pass_vec = target_pos - self.pos
+        pass_dist = np.linalg.norm(pass_vec)
+        
+        if pass_dist < 5.0 or pass_dist > 50.0:
+            return 0.0
+        
+        safety_score = 1.0
+        for opp_pos in ctx.opponent_positions:
+            can_intercept, time_margin = time_to_intercept(
+                opp_pos, PLAYER_SPRINT_SPEED,
+                self.pos, target_pos, BALL_PASS_SPEED
+            )
+            if can_intercept:
+                safety_score *= max(0.1, float(0.5 + time_margin))
+        
+        my_goal_dist = ctx.dist_to_goal
+        target_goal_dist = distance_to_goal(target_pos, ctx.team)
+        progress_factor = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
+        progress_factor = float(np.clip(progress_factor, 0, 1))
+        
+        optimal_dist = 20.0
+        dist_factor = 1.0 - abs(pass_dist - optimal_dist) / 50.0
+        dist_factor = max(0.0, float(dist_factor))
+        
+        score = (
+            PASS_SAFETY_WEIGHT * safety_score +
+            PASS_GOAL_PROGRESS_WEIGHT * progress_factor +
+            PASS_DISTANCE_WEIGHT * dist_factor +
+            PASS_BONUS  # Added bonus to encourage passing
+        )
+        
+        # Extra bonus for passing to moving teammates
+        if np.linalg.norm(teammate.vel) > 0.3:
+            score += 0.1
+        
+        return score
 
     def _evaluate_dribble(self, ctx):
         """Evaluate dribbling options. Returns (best_direction, score)."""
@@ -383,13 +428,15 @@ class Player:
         # Track last touch
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
-    def _execute_pass(self, ctx, game, target_player):
-        """Execute a pass to target teammate."""
+    def _execute_pass(self, ctx, game, target_player, target_pos=None):
+        """Execute a pass to target position (or teammate if no target specified)."""
         self.has_ball = False
         game.ball.owner_id = None
         
-        lead_factor = 0.3
-        target_pos = target_player.pos + target_player.vel * lead_factor * 10
+        # Use provided target position (for space passes) or calculate from teammate
+        if target_pos is None:
+            lead_factor = 0.3
+            target_pos = target_player.pos + target_player.vel * lead_factor * 10
         
         pass_dir = normalize(target_pos - self.pos)
         game.ball.vel = pass_dir * BALL_PASS_SPEED
@@ -403,6 +450,11 @@ class Player:
 
     def _make_off_ball_decision(self, ctx, game):
         """Decision making when player doesn't have the ball."""
+        
+        # Special GK behavior - stay near goal, only move laterally
+        if self.role == 'GK':
+            self._make_gk_decision(ctx, game)
+            return
         
         ball_owner = None
         if game.ball.owner_id is not None:
@@ -459,13 +511,56 @@ class Player:
         
         return target
 
+    def _make_gk_decision(self, ctx, game):
+        """Special decision making for goalkeepers - stay near goal, track ball laterally."""
+        # Define GK zone boundaries
+        if self.team == 'home':
+            goal_x = 5.0
+            min_x = 3.0
+            max_x = 15.0  # Stay within 10 units of goal line
+            penalty_x = 20.0  # Penalty area boundary
+        else:
+            goal_x = 95.0
+            min_x = 85.0
+            max_x = 97.0
+            penalty_x = 80.0
+        
+        ball_pos = game.ball.pos
+        
+        # Check if ball is in GK's penalty area (and loose)
+        ball_in_penalty = (self.team == 'home' and ball_pos[0] < penalty_x) or \
+                          (self.team == 'away' and ball_pos[0] > penalty_x)
+        
+        # If ball is loose and in penalty area, GK can chase it (but still respect x limits)
+        if game.ball.owner_id is None and ball_in_penalty:
+            # Clamp target to the GK zone
+            target_x = np.clip(ball_pos[0], min_x, max_x)
+            target_y = np.clip(ball_pos[1], 35.0, 65.0)
+            target = np.array([target_x, target_y])
+            
+            to_target = target - self.pos
+            dist = np.linalg.norm(to_target)
+            if dist > 1.0:
+                self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
+            else:
+                self.vel = np.zeros(2)
+            return
+        
+        # Otherwise, stay on goal line and track ball laterally
+        target_x = goal_x
+        target_y = np.clip(ball_pos[1], 35.0, 65.0)  # Stay within goal area (slightly wider than posts)
+        
+        target = np.array([target_x, target_y])
+        to_target = target - self.pos
+        dist = np.linalg.norm(to_target)
+        
+        if dist > 1.0:
+            self.vel = normalize(to_target) * PLAYER_SPEED
+        else:
+            self.vel = np.zeros(2)
+
     def _get_defend_target(self, ctx, ball_owner):
         """Calculate defensive position when opponent has ball."""
-        if self.role == 'GK':
-            goal_x = 5.0 if self.team == 'home' else 95.0
-            target_y = np.clip(ctx.game.ball.pos[1], 40, 60)
-            return np.array([goal_x, target_y])
-        
         goal_center = np.array([0.0 if self.team == 'home' else 100.0, 50.0])
         ball_to_goal = goal_center - ball_owner.pos
         
