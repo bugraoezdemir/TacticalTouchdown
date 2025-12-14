@@ -515,7 +515,7 @@ class Player:
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
         
-        if pass_dist < 2.0 or pass_dist > 50.0:
+        if pass_dist < 0.5 or pass_dist > 50.0:
             return 0.0
         
         # Check if this is a back pass (toward own goal)
@@ -523,9 +523,8 @@ class Player:
         target_goal_dist = distance_to_goal(target_pos, ctx.team)
         is_back_pass = target_goal_dist > my_goal_dist + 3.0
         
-        # Allow back passes for defenders under pressure - they need safe outlets
-        if is_back_pass and self.role not in ['DEF', 'GK']:
-            return 0.05
+        # Back passes get a progress penalty but are still evaluated fully
+        back_pass_penalty = 0.15 if is_back_pass else 0.0
         
         # GEOMETRIC INTERCEPTION CHECK
         # Calculate ball travel time
@@ -556,42 +555,45 @@ class Player:
                 risk_factor = max(0, 1.0 - time_margin)
                 interception_risk = max(interception_risk, risk_factor)
         
-        # Calculate base safety score
-        if can_be_intercepted:
-            safety_score = max(0.05, 1.0 - interception_risk)
-        else:
-            safety_score = 1.0
+        # CHECK RECEIVER SAFETY - is opponent close to the receiving teammate?
+        receiver_safety = 1.0
+        for opp_pos in ctx.opponent_positions:
+            dist_opp_to_receiver = np.linalg.norm(opp_pos - target_pos)
+            if dist_opp_to_receiver < 5.0:
+                # Opponent is very close to receiver - risky
+                receiver_safety = min(receiver_safety, dist_opp_to_receiver / 5.0)
         
-        # ROLE-BASED RISK TOLERANCE - HARD GATES for defenders
-        # Defenders and GK: if ANY interception risk, return 0 to force clearance
-        if self.role == 'DEF' and can_be_intercepted:
-            return 0.0  # Defenders NEVER make interceptable passes
-        if self.role == 'GK' and (can_be_intercepted or interception_risk > 0.1):
-            return 0.0  # GK NEVER makes risky passes
+        # Calculate base safety score - combine path safety and receiver safety
+        path_safety = 1.0 - interception_risk if can_be_intercepted else 1.0
+        safety_score = path_safety * receiver_safety
         
-        # For other roles, apply penalties
-        if can_be_intercepted:
-            safety_score *= 0.3  # Significant penalty but still possible
+        # ROLE-BASED RISK TOLERANCE
+        if self.role == 'DEF' and (can_be_intercepted or receiver_safety < 0.5):
+            return 0.0  # Defenders avoid risky passes
+        if self.role == 'GK' and (can_be_intercepted or receiver_safety < 0.7):
+            return 0.0  # GK is most conservative
         
-        # Progress factor
+        # Progress factor - mild bonus for forward passes
         progress_factor = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
         progress_factor = float(np.clip(progress_factor, 0, 1))
         
-        optimal_dist = 20.0
-        dist_factor = 1.0 - abs(pass_dist - optimal_dist) / 50.0
-        dist_factor = max(0.0, float(dist_factor))
+        # Distance factor - prefer medium-range passes but don't penalize short ones much
+        if pass_dist < 5.0:
+            dist_factor = 0.8  # Short passes are fine
+        elif pass_dist < 25.0:
+            dist_factor = 1.0  # Optimal range
+        else:
+            dist_factor = max(0.3, 1.0 - (pass_dist - 25.0) / 25.0)
         
+        # REBALANCED SCORING: Safety is DOMINANT (70%), progress and distance minor
         score = (
-            PASS_SAFETY_WEIGHT * safety_score +
-            PASS_GOAL_PROGRESS_WEIGHT * progress_factor +
-            PASS_DISTANCE_WEIGHT * dist_factor +
-            PASS_BONUS
+            0.70 * safety_score +           # Safety is most important
+            0.15 * progress_factor +         # Forward progress is nice but not critical
+            0.15 * dist_factor -             # Distance is minor factor
+            back_pass_penalty                # Mild penalty for going backward
         )
         
-        if np.linalg.norm(teammate.vel) > 0.3:
-            score += 0.1
-        
-        return score
+        return max(0.0, score)
 
     def _evaluate_dribble(self, ctx):
         """Evaluate dribbling options. Returns (best_direction, score)."""
