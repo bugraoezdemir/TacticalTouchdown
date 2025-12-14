@@ -501,6 +501,7 @@ class Game:
         self.restart_team = 'home'
         self.last_ball_pos = np.array([50.0, 50.0])  # Track last in-bounds position
         self.dribble_tick = 0  # Counter for dribble touch system
+        self.steal_cooldown = 0  # Prevent immediate re-steals
         self.init_players()
 
     def init_players(self):
@@ -556,19 +557,24 @@ class Game:
             owner = next((p for p in self.players if p.id == self.ball.owner_id), None)
             if owner:
                 # Check if opponent is pressuring the ball carrier (tackle attempt)
-                for p in self.players:
-                    if p.team != owner.team:
-                        dist = np.linalg.norm(p.pos - owner.pos)
-                        if dist <= TACKLE_DISTANCE:
-                            # 30% chance to steal when pressing - higher than old 15%
-                            if random.random() < 0.30:
-                                owner.has_ball = False
-                                self.ball.owner_id = p.id
-                                p.has_ball = True
-                                self.ball.pos = p.pos.copy()
-                                self.last_touch = LastTouch(team=p.team, player_id=p.id)
-                                self.dribble_tick = 0
-                                break
+                # Cooldown prevents ping-pong steals
+                if self.steal_cooldown > 0:
+                    self.steal_cooldown -= 1
+                else:
+                    for p in self.players:
+                        if p.team != owner.team:
+                            dist = np.linalg.norm(p.pos - owner.pos)
+                            if dist <= TACKLE_DISTANCE:
+                                # 30% chance to steal when pressing
+                                if random.random() < 0.30:
+                                    owner.has_ball = False
+                                    self.ball.owner_id = p.id
+                                    p.has_ball = True
+                                    self.ball.pos = p.pos.copy()
+                                    self.last_touch = LastTouch(team=p.team, player_id=p.id)
+                                    self.dribble_tick = 0
+                                    self.steal_cooldown = 10  # 10 ticks cooldown before next steal possible
+                                    break
                 
                 # If still has ball, apply dribble touch system
                 if self.ball.owner_id == owner.id:
