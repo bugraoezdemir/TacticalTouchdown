@@ -419,21 +419,20 @@ class Player:
                 self._execute_clearance(ctx, game)
                 return
         
-        # Attackers in shooting range should prefer dribble/shoot unless pass is very safe
-        in_shooting_range = ctx.dist_to_goal < 30.0
+        # ATTACKERS IN FINAL THIRD (last 1/3 of pitch) prefer dribble/shoot
+        in_final_third = ctx.dist_to_goal < 33.0  # 1/3 of 100-unit pitch
         is_attacker = self.role in ['FWD', 'MID']
         
-        if in_shooting_range and is_attacker:
-            # In attacking zone: shoot > dribble > very safe pass
-            if shoot_score > SHOOT_SCORE_THRESHOLD:
+        if in_final_third and is_attacker:
+            # In attacking zone: STRONGLY prefer shoot > dribble, pass only if very safe
+            if shoot_score > 0.05:  # Very low threshold - shoot whenever possible
                 self._execute_shoot(ctx, game)
-            elif dribble_score > 0.3:
+            elif dribble_score > 0.2:  # Prefer dribbling to create space
                 self._execute_dribble(ctx, game, dribble_dir)
-            elif pass_score > 0.6 and pass_option is not None:  # Only very safe passes
+            elif pass_score > 0.7 and pass_option is not None:  # Only VERY safe passes
                 self._execute_pass(ctx, game, pass_option, pass_target)
-            elif shoot_score > 0.1:
-                self._execute_shoot(ctx, game)
             else:
+                # Default to dribble in attacking zone
                 self._execute_dribble(ctx, game, dribble_dir)
         else:
             # Normal decision making outside shooting range
@@ -700,6 +699,13 @@ class Player:
         self.has_ball = False
         game.ball.owner_id = None
         
+        # Count nearby opponents to determine pressure level
+        nearby_opponents = 0
+        for opp_pos in ctx.opponent_positions:
+            if np.linalg.norm(opp_pos - self.pos) < 15.0:
+                nearby_opponents += 1
+        under_heavy_pressure = nearby_opponents >= 2
+        
         # Generate multiple clearance target candidates and pick safest
         candidates = []
         goal_x = ctx.goal_x
@@ -707,29 +713,28 @@ class Player:
         # Wide range of target Y positions - forward clearances
         for target_y in [20.0, 35.0, 50.0, 65.0, 80.0]:
             target = np.array([goal_x, target_y])
-            candidates.append(target)
+            candidates.append(('forward', target))
             # Also add shorter clearances (safer, less distance)
             mid_x = self.pos[0] + (goal_x - self.pos[0]) * 0.5
-            candidates.append(np.array([mid_x, target_y]))
+            candidates.append(('forward', np.array([mid_x, target_y])))
         
-        # Add WIDE CHANNEL targets (touchline dumps) - very safe options
-        # These go to the sidelines where possession is less critical
+        # Add TOUCHLINE targets (corner/throw-in) - safe when under pressure
         # Direction depends on team - always push toward opponent goal
         x_direction = 1.0 if self.team == 'home' else -1.0
-        for x_offset in [15.0, 30.0]:
+        for x_offset in [10.0, 20.0, 30.0]:
             target_x = self.pos[0] + x_offset * x_direction
-            target_x = np.clip(target_x, 10.0, 90.0)
-            candidates.append(np.array([target_x, 5.0]))   # Near bottom touchline
-            candidates.append(np.array([target_x, 95.0]))  # Near top touchline
+            target_x = np.clip(target_x, 5.0, 95.0)
+            candidates.append(('touchline', np.array([target_x, 0.0])))   # Bottom touchline (throw-in/corner)
+            candidates.append(('touchline', np.array([target_x, 100.0]))) # Top touchline (throw-in/corner)
         
         # Score each candidate based on opponent proximity to ball path
         best_target = np.array([goal_x, 50.0])
         best_score = -999.0
         
-        for target in candidates:
+        for clear_type, target in candidates:
             clear_vec = target - self.pos
             clear_dist = np.linalg.norm(clear_vec)
-            if clear_dist < 10.0:
+            if clear_dist < 8.0:
                 continue
             
             # Check safety - how close can opponents get to the ball path?
@@ -744,11 +749,15 @@ class Player:
                 time_margin = time_ball_reaches - time_opp_reaches
                 min_time_margin = min(min_time_margin, time_margin)
             
-            # Score: higher time margin = safer, prefer forward progress
-            safety_score = min(min_time_margin, 2.0)  # Cap at 2.0
+            # Score: higher time margin = safer
+            safety_score = min(float(min_time_margin), 2.0)  # Cap at 2.0
             progress_score = (goal_x - self.pos[0]) / 100.0 if self.team == 'home' else (self.pos[0] - goal_x) / 100.0
             
             score = safety_score * 2.0 + progress_score + clear_dist / 50.0
+            
+            # UNDER HEAVY PRESSURE: Strongly prefer touchline clearances
+            if under_heavy_pressure and clear_type == 'touchline':
+                score += 3.0  # Big bonus for touchline when crowded
             
             if score > best_score:
                 best_score = score
