@@ -142,21 +142,17 @@ export const useGameStore = create<GameStore>((set, get) => ({
       } catch (e) { console.error("Failed to init game:", e) }
   },
 
-  setTactics: async (updates) => {
-      try {
-        const res = await fetch('/api/tactics', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(updates)
-        });
-        if (res.ok) {
-          const data = await res.json();
-          set((state) => ({
-            tactics: { ...state.tactics, ...data }
-          }));
-        }
-      } catch (e) {
-        console.error("Failed to set tactics:", e);
-      }
+  setTactics: (updates) => {
+      set((state) => ({
+        tactics: { ...state.tactics, ...updates }
+      }));
+      
+      fetch('/api/tactics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      }).catch((e) => {
+        console.error("Failed to sync tactics:", e);
+      });
   }
 }));

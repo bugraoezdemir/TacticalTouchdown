@@ -5,29 +5,15 @@ import { Label } from "@/components/ui/label";
 import { Shield, Sword, Gauge, Target, Users } from "lucide-react";
 import { useGameStore } from "@/store/gameStore";
 
+const defaultFormations = ['4-4-2', '4-3-3', '3-5-2', '5-3-2'];
+const defaultMentalities = ['defensive', 'normal', 'offensive'];
+
 export default function TacticsPanel() {
   const tactics = useGameStore((state) => state.tactics);
   const setTactics = useGameStore((state) => state.setTactics);
 
-  const handleFormationChange = (formation: string) => {
-    console.log('Formation clicked:', formation);
-    setTactics({ formation });
-  };
-
-  const handleMentalityChange = (mentality: string) => {
-    console.log('Mentality clicked:', mentality);
-    setTactics({ mentality });
-  };
-
-  const handleDribbleChange = (value: number[]) => {
-    console.log('Dribble slider changed:', value[0]);
-    setTactics({ dribbleFrequency: value[0] });
-  };
-
-  const handleShootChange = (value: number[]) => {
-    console.log('Shoot slider changed:', value[0]);
-    setTactics({ shootFrequency: value[0] });
-  };
+  const formations = tactics.availableFormations?.length ? tactics.availableFormations : defaultFormations;
+  const mentalities = tactics.availableMentalities?.length ? tactics.availableMentalities : defaultMentalities;
 
   const getMentalityIcon = (mentality: string) => {
     switch (mentality) {
@@ -37,38 +23,52 @@ export default function TacticsPanel() {
     }
   };
 
-  const getMentalityColor = (mentality: string, isActive: boolean) => {
-    if (!isActive) return 'opacity-50 hover:opacity-100';
+  const getMentalityStyle = (mentality: string, isActive: boolean) => {
+    if (!isActive) return 'opacity-60 hover:opacity-100 hover:bg-white/5';
     switch (mentality) {
-      case 'defensive': return 'bg-blue-500/20 border-blue-500/40 text-blue-400';
-      case 'offensive': return 'bg-red-500/20 border-red-500/40 text-red-400';
-      default: return 'bg-primary/10 border-primary/20 text-primary';
+      case 'defensive': return 'bg-blue-500/20 border-blue-500/50 text-blue-400';
+      case 'offensive': return 'bg-red-500/20 border-red-500/50 text-red-400';
+      default: return 'bg-primary/20 border-primary/50 text-primary';
     }
   };
 
+  const getDribbleLabel = (value: number) => {
+    if (value < 0.8) return 'Low';
+    if (value > 1.2) return 'High';
+    return 'Normal';
+  };
+
+  const getShootLabel = (value: number) => {
+    if (value < 0.8) return 'Low';
+    if (value > 1.2) return 'High';
+    return 'Normal';
+  };
+
   return (
-    <Card className="h-full bg-card/50 border-white/5 backdrop-blur-sm relative z-10" data-testid="tactics-panel">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-primary">
+    <Card className="h-full bg-card/50 border-white/10 backdrop-blur-sm" data-testid="tactics-panel">
+      <CardHeader className="pb-4">
+        <CardTitle className="flex items-center gap-2 text-primary text-lg">
           <Gauge className="w-5 h-5" /> Tactical Command
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
-        
         <div className="space-y-3">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Formation</Label>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">
+            Formation
+          </Label>
           <div className="grid grid-cols-2 gap-2">
-            {(tactics.availableFormations || ['4-4-2', '4-3-3', '3-5-2', '5-3-2']).map((formation) => (
+            {formations.map((formation) => (
               <Button
                 key={formation}
                 variant="outline"
                 size="sm"
                 data-testid={`button-formation-${formation}`}
-                className={tactics.formation === formation 
-                  ? 'bg-primary/10 border-primary/20 text-primary hover:bg-primary/20' 
-                  : 'opacity-50 hover:opacity-100'
+                className={
+                  tactics.formation === formation
+                    ? 'bg-primary/20 border-primary/50 text-primary font-bold'
+                    : 'opacity-60 hover:opacity-100 hover:bg-white/5'
                 }
-                onClick={() => handleFormationChange(formation)}
+                onClick={() => setTactics({ formation })}
               >
                 {formation}
               </Button>
@@ -77,72 +77,77 @@ export default function TacticsPanel() {
         </div>
 
         <div className="space-y-3">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Mentality</Label>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">
+            Mentality
+          </Label>
           <div className="grid grid-cols-3 gap-2">
-            {(tactics.availableMentalities || ['defensive', 'normal', 'offensive']).map((mentality) => (
+            {mentalities.map((mentality) => (
               <Button
                 key={mentality}
                 variant="outline"
                 size="sm"
                 data-testid={`button-mentality-${mentality}`}
-                className={getMentalityColor(mentality, tactics.mentality === mentality)}
-                onClick={() => handleMentalityChange(mentality)}
+                className={getMentalityStyle(mentality, tactics.mentality === mentality)}
+                onClick={() => setTactics({ mentality })}
               >
                 <span className="flex items-center gap-1 capitalize">
                   {getMentalityIcon(mentality)}
-                  <span className="hidden sm:inline">{mentality}</span>
+                  <span className="hidden sm:inline text-xs">{mentality}</span>
                 </span>
               </Button>
             ))}
           </div>
         </div>
 
-        <div className="space-y-4 pt-4 border-t border-white/5">
-          <div className="space-y-2">
-            <div className="flex justify-between">
-              <Label className="flex items-center gap-2">
+        <div className="space-y-4 pt-4 border-t border-white/10">
+          <div className="space-y-3">
+            <div className="flex justify-between items-center">
+              <Label className="flex items-center gap-2 text-sm">
                 <Users className="w-4 h-4 text-yellow-400" /> Dribbling
               </Label>
-              <span className="text-xs text-muted-foreground" data-testid="text-dribble-value">
-                {(tactics.dribbleFrequency ?? 1.0) < 0.8 ? 'Low' : (tactics.dribbleFrequency ?? 1.0) > 1.2 ? 'High' : 'Normal'}
+              <span className="text-xs text-muted-foreground font-medium" data-testid="text-dribble-value">
+                {getDribbleLabel(tactics.dribbleFrequency ?? 1.0)}
               </span>
             </div>
             <Slider
               data-testid="slider-dribble"
               value={[tactics.dribbleFrequency ?? 1.0]}
-              onValueChange={handleDribbleChange}
+              onValueChange={(value) => setTactics({ dribbleFrequency: value[0] })}
               min={0.5}
               max={2.0}
               step={0.1}
-              className="[&_.bg-primary]:bg-yellow-500"
+              className="cursor-pointer"
             />
           </div>
 
-          <div className="space-y-2">
-            <div className="flex justify-between">
-              <Label className="flex items-center gap-2">
+          <div className="space-y-3">
+            <div className="flex justify-between items-center">
+              <Label className="flex items-center gap-2 text-sm">
                 <Target className="w-4 h-4 text-green-400" /> Shooting
               </Label>
-              <span className="text-xs text-muted-foreground" data-testid="text-shoot-value">
-                {(tactics.shootFrequency ?? 1.0) < 0.8 ? 'Low' : (tactics.shootFrequency ?? 1.0) > 1.2 ? 'High' : 'Normal'}
+              <span className="text-xs text-muted-foreground font-medium" data-testid="text-shoot-value">
+                {getShootLabel(tactics.shootFrequency ?? 1.0)}
               </span>
             </div>
             <Slider
               data-testid="slider-shoot"
               value={[tactics.shootFrequency ?? 1.0]}
-              onValueChange={handleShootChange}
+              onValueChange={(value) => setTactics({ shootFrequency: value[0] })}
               min={0.5}
               max={2.0}
               step={0.1}
-              className="[&_.bg-primary]:bg-green-500"
+              className="cursor-pointer"
             />
           </div>
         </div>
 
-        <div className="pt-4 border-t border-white/5 text-xs text-muted-foreground">
-          <p>Current: <span className="text-primary font-medium">{tactics.formation}</span> / <span className="capitalize font-medium">{tactics.mentality}</span></p>
+        <div className="pt-4 border-t border-white/10 text-sm text-muted-foreground">
+          <p>
+            Current: <span className="text-primary font-bold">{tactics.formation}</span>
+            {' / '}
+            <span className="capitalize font-bold">{tactics.mentality}</span>
+          </p>
         </div>
-
       </CardContent>
     </Card>
   );
