@@ -41,7 +41,7 @@ HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
 
 # Dribble touch system
 DRIBBLE_TOUCH_INTERVAL = 5  # Every N ticks, ball moves ahead
-DRIBBLE_TOUCH_DISTANCE = 1.5  # How far ball moves ahead of dribbler
+DRIBBLE_TOUCH_DISTANCE = 2.5  # How far ball moves ahead (must be > TACKLE_DISTANCE to allow interception)
 
 
 class GameState(Enum):
@@ -509,6 +509,7 @@ class Game:
         self.last_ball_pos = np.array([50.0, 50.0])  # Track last in-bounds position
         self.dribble_tick = 0  # Counter for dribble touch system
         self.steal_cooldown = 0  # Prevent immediate re-steals
+        self.last_dribbler_id = None  # Track who just released ball to prevent instant re-pickup
         self.init_players()
 
     def init_players(self):
@@ -593,9 +594,10 @@ class Game:
                             dribble_dir = normalize(owner.vel)
                             self.ball.pos = owner.pos + dribble_dir * DRIBBLE_TOUCH_DISTANCE
                             # Ball becomes loose - clear ownership
+                            self.last_dribbler_id = owner.id  # Remember who released it
                             owner.has_ball = False
                             self.ball.owner_id = None
-                            self.ball.vel = dribble_dir * 0.3  # Small momentum
+                            self.ball.vel = dribble_dir * 0.5  # Give ball more momentum
                         else:
                             # Standing still - ball stays with player
                             self.ball.pos = owner.pos.copy()
@@ -618,6 +620,9 @@ class Game:
             closest_player = None
             min_dist = float('inf')
             for p in self.players:
+                # Skip the player who just released the ball (dribble touch)
+                if p.id == self.last_dribbler_id:
+                    continue
                 dist = np.linalg.norm(p.pos - self.ball.pos)
                 if dist < min_dist:
                     min_dist = dist
@@ -629,6 +634,10 @@ class Game:
                 self.ball.owner_id = closest_player.id
                 self.ball.vel = np.zeros(2)
                 self.last_touch = LastTouch(team=closest_player.team, player_id=closest_player.id)
+                self.last_dribbler_id = None  # Clear after someone else picks up
+            elif min_dist >= TACKLE_DISTANCE:
+                # No one close enough - dribbler can get it back next tick
+                self.last_dribbler_id = None
 
     def _detect_ball_event(self):
         """Detect if ball went out of play. Returns event type or None."""
