@@ -21,11 +21,11 @@ BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.0
 BALL_FRICTION = 0.95
 
-# Decision weights - increased pass weights so players pass more often
-PASS_SAFETY_WEIGHT = 0.5       # Was 0.4 - value safe passes more
-PASS_GOAL_PROGRESS_WEIGHT = 0.4 # Was 0.3 - value forward progress more
+# Decision weights - safety-first passing with stricter thresholds
+PASS_SAFETY_WEIGHT = 0.6       # Was 0.5 - value safe passes more
+PASS_GOAL_PROGRESS_WEIGHT = 0.3 # Was 0.4 - balance with safety
 PASS_DISTANCE_WEIGHT = 0.3
-SPACE_PASS_BONUS = 0.0  # Disabled - prefer direct passes to teammates
+SPACE_PASS_BONUS = 0.15  # Re-enabled for space passes
 
 DRIBBLE_CLEARANCE_WEIGHT = 0.35  # Reduced - dribble less
 DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.35  # Reduced - favor passing
@@ -33,9 +33,9 @@ DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.35  # Reduced - favor passing
 SHOOT_DISTANCE_THRESHOLD = 35.0  # Increased from 25 - shoot from further
 SHOOT_ANGLE_THRESHOLD = 30.0
 
-# Lowered thresholds for actions
+# Action thresholds - stricter passing requirements
 SHOOT_SCORE_THRESHOLD = 0.10  # Very low threshold - shoot frequently when chance arises
-PASS_SCORE_THRESHOLD = 0.15   # Only pass if it's a decent option (no back passes)
+PASS_SCORE_THRESHOLD = 0.25   # Stricter - only pass if it's a safe option
 
 # Pass evaluation - no artificial bonus, safety-first approach
 PASS_BONUS = 0.0  # Removed - let natural safety scoring decide
@@ -46,6 +46,11 @@ HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
 # Dribble touch system
 DRIBBLE_TOUCH_INTERVAL = 5  # Every N ticks, ball moves ahead
 DRIBBLE_TOUCH_DISTANCE = 2.5  # How far ball moves ahead (must be > TACKLE_DISTANCE to allow interception)
+
+# Vision system constants
+VISION_ANGLE = 140.0  # Degrees - realistic peripheral vision
+VISION_DISTANCE = 50.0  # Can see teammates this far ahead
+BACK_VISION_DISTANCE = 25.0  # Limited rear vision
 
 # TACTICAL SYSTEM
 
@@ -207,6 +212,39 @@ def normalize(v):
         return np.zeros_like(v)
     return v / mag
 
+def is_in_vision_cone(observer_pos, observer_facing, target_pos, 
+                      max_angle=VISION_ANGLE, max_distance=VISION_DISTANCE):
+    """Check if target is within observer's vision cone."""
+    to_target = target_pos - observer_pos
+    dist = np.linalg.norm(to_target)
+    
+    if dist < 1e-6 or dist > max_distance:
+        return False, float(dist), 180.0
+    
+    to_target_normalized = to_target / dist
+    angle = math.degrees(math.acos(np.clip(
+        np.dot(observer_facing, to_target_normalized), -1.0, 1.0)))
+    
+    return angle <= max_angle / 2.0, float(dist), float(angle)
+
+def calculate_passing_lane_quality(passer_pos, target_pos, opponents):
+    """Calculate quality of passing lane - 0 (blocked) to 1 (clear)."""
+    corridor_width = 3.0
+    blocking_opponents = 0
+    
+    for opp_pos in opponents:
+        dist_to_line = distance_point_to_segment(opp_pos, passer_pos, target_pos)
+        to_opp = opp_pos - passer_pos
+        pass_vec = target_pos - passer_pos
+        proj = np.dot(to_opp, pass_vec) / max(np.linalg.norm(pass_vec), 1e-6)
+        
+        if 0 < proj < np.linalg.norm(pass_vec) and dist_to_line < corridor_width:
+            blocking_opponents += 1
+    
+    if blocking_opponents == 0:
+        return 1.0
+    return max(0.0, 1.0 / (1.0 + blocking_opponents * 0.5))
+
 def project_point_to_segment(point, seg_start, seg_end):
     """Project a point onto a line segment, return closest point on segment."""
     seg_vec = seg_end - seg_start
@@ -317,6 +355,12 @@ class DecisionContext:
         self.goal_x = 100.0 if self.team == 'home' else 0.0
         self.goal_center = np.array([self.goal_x, 50.0])
         self.dist_to_goal = distance_to_goal(player.pos, self.team)
+        
+        # Calculate facing direction for vision system
+        if np.linalg.norm(player.vel) > 0.1:
+            self.facing = normalize(player.vel)
+        else:
+            self.facing = normalize(self.goal_center - player.pos)
 
 
 class Player:
