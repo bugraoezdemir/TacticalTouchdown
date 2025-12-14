@@ -22,10 +22,6 @@ process.on('exit', () => {
     pythonProcess.kill();
 });
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
@@ -37,7 +33,7 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
-// Proxy API requests to Python
+// Proxy API requests to Python BEFORE body parsers consume the body
 // Mount at /api so requests to /api/... go to http://127.0.0.1:5001/...
 app.use('/api', createProxyMiddleware({
   target: 'http://127.0.0.1:5001',
@@ -45,6 +41,10 @@ app.use('/api', createProxyMiddleware({
   pathRewrite: { '^/api': '' },  // Strip /api prefix when forwarding
   logLevel: 'debug'
 }));
+
+// Body parsers for non-proxied routes
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 (async () => {
   await registerRoutes(httpServer, app);
