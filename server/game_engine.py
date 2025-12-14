@@ -792,10 +792,13 @@ class Player:
             # Check if ball is in our zone
             ball_in_zone = self._is_in_zone(game.ball.pos)
             
-            # Check if ball is near our own goal (defenders must chase)
+            # Check if ball is in our defensive half (defenders should be aggressive)
             own_goal_x = 0.0 if self.team == 'home' else 100.0
             ball_dist_to_own_goal = abs(game.ball.pos[0] - own_goal_x)
             ball_near_own_goal = ball_dist_to_own_goal < 30.0
+            
+            # NEW: Check if ball is in our defensive half (first 50 units from our goal)
+            ball_in_defensive_half = ball_dist_to_own_goal < 50.0
             
             # Check if we're one of the closest teammates
             closer_teammates = sum(1 for t in ctx.teammates 
@@ -811,6 +814,9 @@ class Player:
             should_chase = False
             if my_dist < 8.0:  # Very close - always chase
                 should_chase = True
+            elif self.role == 'DEF' and ball_in_defensive_half and my_dist < 35.0:
+                # DEFENDERS ARE AGGRESSIVE: Chase when ball enters their half
+                should_chase = True
             elif ball_near_own_goal and self.role == 'DEF' and my_dist < 25.0:
                 # Defenders MUST chase when ball is near own goal
                 should_chase = True
@@ -821,8 +827,10 @@ class Player:
             
             if should_chase:
                 if my_dist > 1.0:
-                    # Defenders near own goal chase directly, others respect zone
-                    if ball_near_own_goal and self.role == 'DEF':
+                    # Defenders chase directly in their defensive half - no zone clamping
+                    if self.role == 'DEF' and ball_in_defensive_half:
+                        chase_target = game.ball.pos  # Chase directly
+                    elif ball_near_own_goal and self.role == 'DEF':
                         chase_target = game.ball.pos  # Chase directly
                     else:
                         chase_target = self._clamp_to_zone(game.ball.pos)
@@ -988,28 +996,34 @@ class Player:
         return best_spot
 
     def _make_gk_decision(self, ctx, game):
-        """Special decision making for goalkeepers - stay near goal, track ball laterally."""
+        """Special decision making for goalkeepers - stay CENTERED in goal, only move when ball is close."""
         # Define GK zone boundaries
         if self.team == 'home':
             goal_x = 5.0
             min_x = 3.0
-            max_x = 15.0  # Stay within 10 units of goal line
-            penalty_x = 20.0  # Penalty area boundary
+            max_x = 15.0
+            penalty_x = 20.0
+            own_goal_x = 0.0
         else:
             goal_x = 95.0
             min_x = 85.0
             max_x = 97.0
             penalty_x = 80.0
+            own_goal_x = 100.0
         
         ball_pos = game.ball.pos
+        goal_center_y = 50.0  # Center of goal
+        
+        # Calculate ball distance from goal
+        ball_dist_to_goal = abs(ball_pos[0] - own_goal_x)
+        ball_close_to_goal = ball_dist_to_goal < 25.0  # Ball within 25 units of goal
         
         # Check if ball is in GK's penalty area (and loose)
         ball_in_penalty = (self.team == 'home' and ball_pos[0] < penalty_x) or \
                           (self.team == 'away' and ball_pos[0] > penalty_x)
         
-        # If ball is loose and in penalty area, GK can chase it (but still respect x limits)
+        # If ball is loose and in penalty area, GK can chase it
         if game.ball.owner_id is None and ball_in_penalty:
-            # Clamp target to the GK zone
             target_x = np.clip(ball_pos[0], min_x, max_x)
             target_y = np.clip(ball_pos[1], 35.0, 65.0)
             target = np.array([target_x, target_y])
@@ -1022,16 +1036,23 @@ class Player:
                 self.vel = np.zeros(2)
             return
         
-        # Otherwise, stay on goal line and track ball laterally
+        # STAY CENTERED unless ball is close to goal
         target_x = goal_x
-        target_y = np.clip(ball_pos[1], 35.0, 65.0)  # Stay within goal area (slightly wider than posts)
+        if ball_close_to_goal:
+            # Ball is close - track it laterally but not too aggressively
+            # Ease toward ball y with damping - don't fully commit
+            target_y = goal_center_y + (ball_pos[1] - goal_center_y) * 0.6
+            target_y = np.clip(target_y, 40.0, 60.0)  # Stay within goal posts
+        else:
+            # Ball is far - stay in center of goal
+            target_y = goal_center_y
         
         target = np.array([target_x, target_y])
         to_target = target - self.pos
         dist = np.linalg.norm(to_target)
         
         if dist > 1.0:
-            self.vel = normalize(to_target) * PLAYER_SPEED
+            self.vel = normalize(to_target) * PLAYER_SPEED * 0.7  # Move slowly to center
         else:
             self.vel = np.zeros(2)
 
