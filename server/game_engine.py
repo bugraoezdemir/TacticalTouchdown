@@ -384,15 +384,12 @@ class Player:
             self._execute_clearance(ctx, game)
             return
         
-        # Check if we need a defensive clearance (ball near own goal) - not for GK
+        # Track distance to own goal for later decision making
         own_goal_x = 0.0 if self.team == 'home' else 100.0
         dist_to_own_goal = abs(self.pos[0] - own_goal_x)
+        near_own_goal = dist_to_own_goal < 20.0 and self.role != 'FWD'
         
-        # If very close to own goal, clear the ball upfield
-        if dist_to_own_goal < 20.0 and self.role != 'FWD':
-            self._execute_clearance(ctx, game)
-            return
-        
+        # ALWAYS evaluate options first - even near own goal
         shoot_score = self._evaluate_shoot(ctx)
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
@@ -402,15 +399,23 @@ class Player:
             shoot_score *= game.home_shoot_frequency
             dribble_score *= game.home_dribble_frequency
         
-        # DEFENDER SAFETY CHECK: Clear if pass is risky or under pressure
-        if self.role == 'DEF':
+        # DEFENDER/NEAR OWN GOAL SAFETY CHECK: Evaluate passes before clearing
+        if self.role == 'DEF' or near_own_goal:
             min_opp_dist = float('inf')
             for opp_pos in ctx.opponent_positions:
                 d = np.linalg.norm(opp_pos - self.pos)
                 min_opp_dist = min(min_opp_dist, float(d))
             
-            # Clear if: pass score is low OR opponent is close
-            if pass_score < 0.5 or min_opp_dist < 12.0:
+            # Has a safe pass option - ALWAYS prefer it over clearing
+            if pass_score >= 0.35 and pass_option is not None:
+                self._execute_pass(ctx, game, pass_option, pass_target)
+                return
+            # Under heavy pressure with no safe pass - clear
+            if min_opp_dist < 10.0 and pass_score < 0.35:
+                self._execute_clearance(ctx, game)
+                return
+            # Near own goal with no safe pass at all - clear
+            if near_own_goal and pass_score < 0.3:
                 self._execute_clearance(ctx, game)
                 return
         
@@ -532,7 +537,7 @@ class Player:
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
         
-        if pass_dist < 5.0 or pass_dist > 50.0:
+        if pass_dist < 2.0 or pass_dist > 50.0:
             return 0.0
         
         # Check if this is a back pass (toward own goal)
@@ -540,7 +545,8 @@ class Player:
         target_goal_dist = distance_to_goal(target_pos, ctx.team)
         is_back_pass = target_goal_dist > my_goal_dist + 3.0
         
-        if is_back_pass:
+        # Allow back passes for defenders under pressure - they need safe outlets
+        if is_back_pass and self.role not in ['DEF', 'GK']:
             return 0.05
         
         # GEOMETRIC INTERCEPTION CHECK
@@ -706,13 +712,23 @@ class Player:
         candidates = []
         goal_x = ctx.goal_x
         
-        # Wide range of target Y positions
+        # Wide range of target Y positions - forward clearances
         for target_y in [20.0, 35.0, 50.0, 65.0, 80.0]:
             target = np.array([goal_x, target_y])
             candidates.append(target)
             # Also add shorter clearances (safer, less distance)
             mid_x = self.pos[0] + (goal_x - self.pos[0]) * 0.5
             candidates.append(np.array([mid_x, target_y]))
+        
+        # Add WIDE CHANNEL targets (touchline dumps) - very safe options
+        # These go to the sidelines where possession is less critical
+        # Direction depends on team - always push toward opponent goal
+        x_direction = 1.0 if self.team == 'home' else -1.0
+        for x_offset in [15.0, 30.0]:
+            target_x = self.pos[0] + x_offset * x_direction
+            target_x = np.clip(target_x, 10.0, 90.0)
+            candidates.append(np.array([target_x, 5.0]))   # Near bottom touchline
+            candidates.append(np.array([target_x, 95.0]))  # Near top touchline
         
         # Score each candidate based on opponent proximity to ball path
         best_target = np.array([goal_x, 50.0])
