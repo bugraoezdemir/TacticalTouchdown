@@ -115,8 +115,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
             time: data.time,
             state: data.state || 'playing',
             lastTouch: data.lastTouch || null,
-            restartTeam: data.restartTeam || 'home',
-            tactics: data.tactics || get().tactics
+            restartTeam: data.restartTeam || 'home'
           });
       } catch (e) {
           console.error("Failed to tick game:", e);
