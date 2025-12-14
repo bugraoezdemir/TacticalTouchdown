@@ -38,10 +38,11 @@ export function log(message: string, source = "express") {
 }
 
 // Proxy API requests to Python
-// Mount at /api so requests to /api/... go to http://127.0.0.1:5001/api/...
+// Mount at /api so requests to /api/... go to http://127.0.0.1:5001/...
 app.use('/api', createProxyMiddleware({
   target: 'http://127.0.0.1:5001',
   changeOrigin: true,
+  pathRewrite: { '^/api': '' },  // Strip /api prefix when forwarding
   logLevel: 'debug'
 }));
 
