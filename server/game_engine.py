@@ -34,8 +34,8 @@ SHOOT_DISTANCE_THRESHOLD = 35.0  # Increased from 25 - shoot from further
 SHOOT_ANGLE_THRESHOLD = 30.0
 
 # Lowered thresholds for actions
-SHOOT_SCORE_THRESHOLD = 0.25  # Was 0.5 - shoot more often
-PASS_SCORE_THRESHOLD = 0.10   # Lower threshold - pass more often
+SHOOT_SCORE_THRESHOLD = 0.20  # Low threshold - shoot when opportunity arises
+PASS_SCORE_THRESHOLD = 0.15   # Only pass if it's a decent option (no back passes)
 
 # Increased pass appeal, reduced dribble appeal
 PASS_BONUS = 0.15  # Added bonus to pass scores
@@ -313,12 +313,21 @@ class Player:
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
         
-        # Choose best action with lowered thresholds
-        if shoot_score > pass_score and shoot_score > dribble_score and shoot_score > SHOOT_SCORE_THRESHOLD:
+        # Prioritize shooting when there's a clear opportunity
+        if shoot_score > SHOOT_SCORE_THRESHOLD and shoot_score >= pass_score * 0.8:
+            # Shoot if it's a decent shot and at least 80% as good as best pass
             self._execute_shoot(ctx, game)
-        elif pass_score > dribble_score and pass_option is not None and pass_score > PASS_SCORE_THRESHOLD:
+        elif pass_score > PASS_SCORE_THRESHOLD and pass_score > dribble_score and pass_option is not None:
+            # Only pass if it's a good forward pass
             self._execute_pass(ctx, game, pass_option, pass_target)
+        elif dribble_score > 0.2:
+            # Dribble forward if space available
+            self._execute_dribble(ctx, game, dribble_dir)
+        elif shoot_score > 0.1:
+            # Try a shot even if not ideal
+            self._execute_shoot(ctx, game)
         else:
+            # Default to dribble
             self._execute_dribble(ctx, game, dribble_dir)
 
     def _evaluate_shoot(self, ctx):
@@ -328,16 +337,32 @@ class Player:
         if dist > SHOOT_DISTANCE_THRESHOLD:
             return 0.0
         
-        blocked = False
+        # Check how many opponents block the shot
+        blocking_count = 0
         for opp_pos in ctx.opponent_positions:
-            if distance_point_to_segment(opp_pos, self.pos, ctx.goal_center) < 3.0:
-                blocked = True
-                break
+            if distance_point_to_segment(opp_pos, self.pos, ctx.goal_center) < 4.0:
+                blocking_count += 1
         
-        distance_factor = 1.0 - (dist / SHOOT_DISTANCE_THRESHOLD)
-        block_factor = 0.3 if blocked else 1.0
+        # Distance factor - closer is better, but also reward medium range shots
+        if dist < 15.0:
+            distance_factor = 1.0  # Very close - great chance
+        elif dist < 25.0:
+            distance_factor = 0.8  # Good shooting range
+        else:
+            distance_factor = 0.5 * (1.0 - (dist - 25.0) / (SHOOT_DISTANCE_THRESHOLD - 25.0))
         
-        return distance_factor * block_factor
+        # Block factor - no blockers = clear shot
+        if blocking_count == 0:
+            block_factor = 1.2  # Bonus for completely clear shot
+        elif blocking_count == 1:
+            block_factor = 0.6  # Still worth trying
+        else:
+            block_factor = 0.2  # Multiple blockers - bad idea
+        
+        # Role bonus - forwards should shoot more
+        role_bonus = 0.2 if self.role == 'FWD' else (0.1 if self.role == 'MID' else 0.0)
+        
+        return distance_factor * block_factor + role_bonus
 
     def _evaluate_pass(self, ctx):
         """Evaluate passing options. Returns (best_teammate, target_pos, score)."""
@@ -397,6 +422,15 @@ class Player:
         if pass_dist < 5.0 or pass_dist > 50.0:
             return 0.0
         
+        # Check if this is a back pass (toward own goal)
+        my_goal_dist = ctx.dist_to_goal
+        target_goal_dist = distance_to_goal(target_pos, ctx.team)
+        is_back_pass = target_goal_dist > my_goal_dist + 3.0  # More than 3 units backward
+        
+        # Heavily penalize back passes - return very low score
+        if is_back_pass:
+            return 0.05  # Almost never choose back pass
+        
         safety_score = 1.0
         for opp_pos in ctx.opponent_positions:
             can_intercept, time_margin = time_to_intercept(
@@ -406,8 +440,7 @@ class Player:
             if can_intercept:
                 safety_score *= max(0.1, float(0.5 + time_margin))
         
-        my_goal_dist = ctx.dist_to_goal
-        target_goal_dist = distance_to_goal(target_pos, ctx.team)
+        # Progress factor - only for forward passes
         progress_factor = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
         progress_factor = float(np.clip(progress_factor, 0, 1))
         
@@ -419,7 +452,7 @@ class Player:
             PASS_SAFETY_WEIGHT * safety_score +
             PASS_GOAL_PROGRESS_WEIGHT * progress_factor +
             PASS_DISTANCE_WEIGHT * dist_factor +
-            PASS_BONUS  # Added bonus to encourage passing
+            PASS_BONUS
         )
         
         # Extra bonus for passing to moving teammates
