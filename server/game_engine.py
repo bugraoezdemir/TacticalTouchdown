@@ -473,7 +473,7 @@ class Player:
         return distance_factor * block_factor + role_bonus
 
     def _evaluate_pass(self, ctx):
-        """Evaluate passing options. Returns (best_teammate, target_pos, score)."""
+        """Evaluate passing options including space passes. Returns (best_teammate, target_pos, score)."""
         if len(ctx.teammates) == 0:
             return None, None, 0.0
         
@@ -481,22 +481,114 @@ class Player:
         best_target = None
         best_score = 0.0
         
+        # Generate candidate pass positions in 360 degrees at various distances
+        num_directions = 16  # Check 16 directions around player
+        pass_distances = [8.0, 15.0, 25.0]  # Short, medium, long
+        
+        candidate_positions = []
+        
+        for i in range(num_directions):
+            angle = (2 * np.pi * i) / num_directions
+            direction = np.array([np.cos(angle), np.sin(angle)])
+            
+            for dist in pass_distances:
+                target = self.pos + direction * dist
+                # Keep within field bounds
+                if 2.0 < target[0] < 98.0 and 2.0 < target[1] < 98.0:
+                    candidate_positions.append(target)
+        
+        # Also add direct teammate positions
         for teammate in ctx.teammates:
-            if teammate.role == 'GK' and ctx.dist_to_goal < 50:
+            if teammate.role != 'GK' or ctx.dist_to_goal >= 50:
+                candidate_positions.append(teammate.pos.copy())
+        
+        # Evaluate each candidate position
+        for target_pos in candidate_positions:
+            # Find which teammate can best reach this position
+            best_reach_teammate = None
+            best_reach_time = float('inf')
+            
+            for teammate in ctx.teammates:
+                if teammate.role == 'GK' and ctx.dist_to_goal < 50:
+                    continue
+                
+                # Time for teammate to reach target
+                dist_to_target = np.linalg.norm(teammate.pos - target_pos)
+                reach_time = dist_to_target / PLAYER_SPRINT_SPEED
+                
+                if reach_time < best_reach_time:
+                    best_reach_time = reach_time
+                    best_reach_teammate = teammate
+            
+            if best_reach_teammate is None:
                 continue
             
-            # Evaluate direct pass to teammate
-            direct_score = self._evaluate_pass_to_target(ctx, teammate.pos, teammate)
-            direct_target = teammate.pos.copy()
+            # Calculate ball travel time
+            pass_dist = np.linalg.norm(target_pos - self.pos)
+            if pass_dist < 3.0 or pass_dist > 45.0:
+                continue
+            ball_time = pass_dist / BALL_PASS_SPEED
             
-            # Always use direct pass to teammate (simpler, more reliable)
-            score = direct_score
-            target = direct_target
+            # Check if teammate can reach target before/when ball arrives
+            # Allow small margin - teammate arrives within 0.5s of ball
+            if best_reach_time > ball_time + 1.5:
+                continue  # Teammate can't reach in time
+            
+            # Evaluate interception risk - check all opponents
+            min_intercept_margin = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                # Time for opponent to reach any point on the pass path
+                closest_on_path = project_point_to_segment(opp_pos, self.pos, target_pos)
+                dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
+                dist_along_path = np.linalg.norm(closest_on_path - self.pos)
+                
+                time_ball_at_point = dist_along_path / BALL_PASS_SPEED
+                time_opp_at_point = dist_to_path / PLAYER_SPRINT_SPEED
+                
+                margin = time_ball_at_point - time_opp_at_point
+                min_intercept_margin = min(min_intercept_margin, margin)
+            
+            # Skip if easily interceptable
+            if min_intercept_margin < 0.3:
+                continue
+            
+            # Score based on:
+            # 1. Interception safety (higher margin = safer)
+            safety_score = min(1.0, min_intercept_margin / 2.0)
+            
+            # 2. Space around target (less opponents nearby = better)
+            space_score = 1.0
+            for opp_pos in ctx.opponent_positions:
+                opp_dist = np.linalg.norm(opp_pos - target_pos)
+                if opp_dist < 10.0:
+                    space_score -= (1.0 - opp_dist / 10.0) * 0.2
+            space_score = max(0.0, space_score)
+            
+            # 3. Progress toward goal
+            my_goal_dist = ctx.dist_to_goal
+            target_goal_dist = distance_to_goal(target_pos, ctx.team)
+            progress_score = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
+            progress_score = float(np.clip(progress_score, 0, 1))
+            
+            # 4. Teammate accessibility bonus
+            access_score = 1.0 - min(best_reach_time / 3.0, 1.0)
+            
+            # Combined score
+            score = (
+                0.40 * safety_score +
+                0.25 * space_score +
+                0.20 * progress_score +
+                0.15 * access_score
+            )
+            
+            # Bonus for very safe options
+            if safety_score > 0.7 and space_score > 0.6:
+                score += 0.1
             
             if score > best_score:
                 best_score = score
-                best_teammate = teammate
-                best_target = target
+                best_teammate = best_reach_teammate
+                best_target = target_pos
         
         return best_teammate, best_target, best_score
     
