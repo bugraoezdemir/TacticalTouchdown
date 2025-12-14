@@ -37,8 +37,8 @@ SHOOT_ANGLE_THRESHOLD = 30.0
 SHOOT_SCORE_THRESHOLD = 0.10  # Very low threshold - shoot frequently when chance arises
 PASS_SCORE_THRESHOLD = 0.15   # Only pass if it's a decent option (no back passes)
 
-# Increased pass appeal, reduced dribble appeal
-PASS_BONUS = 0.15  # Added bonus to pass scores
+# Pass evaluation - no artificial bonus, safety-first approach
+PASS_BONUS = 0.0  # Removed - let natural safety scoring decide
 
 # Home position attraction weight
 HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
@@ -347,6 +347,9 @@ class Player:
         
         # Zone weight based on role
         self.zone_weight = ZONE_WEIGHT_BY_ROLE.get(role, 0.5)
+        
+        # Dribble touch cooldown - prevents instant reacquisition after dribbling
+        self.touch_cooldown_until = 0.0
     
     def to_dict(self):
         return {
@@ -424,12 +427,14 @@ class Player:
         is_attacker = self.role in ['FWD', 'MID']
         
         if in_final_third and is_attacker:
-            # In attacking zone: STRONGLY prefer shoot > dribble, pass only if very safe
-            if shoot_score > 0.05:  # Very low threshold - shoot whenever possible
+            # In attacking zone: Shoot if clear, otherwise pass to build up, dribble as last resort
+            if shoot_score > 0.3:  # Only shoot with reasonable chance
                 self._execute_shoot(ctx, game)
-            elif dribble_score > 0.2:  # Prefer dribbling to create space
+            elif pass_score > 0.5 and pass_option is not None:  # Safe passes encouraged
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            elif dribble_score > 0.3:  # Dribble if space available
                 self._execute_dribble(ctx, game, dribble_dir)
-            elif pass_score > 0.7 and pass_option is not None:  # Only VERY safe passes
+            elif pass_score > 0.3 and pass_option is not None:  # Lower threshold pass
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 # Default to dribble in attacking zone
@@ -554,17 +559,27 @@ class Player:
                 risk_factor = min(1.0, max(0.0, 1.0 - time_margin))
                 interception_risk = max(interception_risk, risk_factor)
         
-        # CHECK RECEIVER SAFETY - is opponent close to the receiving teammate?
+        # CHECK RECEIVER SAFETY - count opponents near the receiving teammate
+        # Extended radius to 8 units, count density not just closest
         receiver_safety = 1.0
+        nearby_opponent_count = 0
         for opp_pos in ctx.opponent_positions:
             dist_opp_to_receiver = np.linalg.norm(opp_pos - target_pos)
-            if dist_opp_to_receiver < 4.0:
-                # Opponent is close to receiver - reduce safety
-                receiver_safety = min(receiver_safety, dist_opp_to_receiver / 4.0)
+            if dist_opp_to_receiver < 8.0:
+                nearby_opponent_count += 1
+                # Closer opponents reduce safety more
+                proximity_penalty = 1.0 - (dist_opp_to_receiver / 8.0)
+                receiver_safety -= proximity_penalty * 0.3
         
-        # Calculate base safety score - WEIGHTED AVERAGE not product
+        # Extra penalty for crowded areas (multiple opponents)
+        if nearby_opponent_count >= 2:
+            receiver_safety -= 0.2 * (nearby_opponent_count - 1)
+        
+        receiver_safety = max(0.0, receiver_safety)
+        
+        # Calculate base safety score - MULTIPLY so both must be safe
         path_safety = max(0.0, 1.0 - interception_risk) if can_be_intercepted else 1.0
-        safety_score = 0.6 * path_safety + 0.4 * receiver_safety
+        safety_score = path_safety * receiver_safety  # Both must be good
         
         # ROLE-BASED RISK TOLERANCE
         if self.role == 'DEF' and (can_be_intercepted or receiver_safety < 0.5):
@@ -584,17 +599,13 @@ class Player:
         else:
             dist_factor = max(0.3, 1.0 - (pass_dist - 25.0) / 25.0)
         
-        # BALANCED SCORING: Safety important but passes must beat dribble scores
+        # SAFETY-FIRST SCORING: Safety is 85%, other factors are tie-breakers
         score = (
-            0.50 * safety_score +           # Safety is important
-            0.25 * progress_factor +         # Forward progress matters
-            0.25 * dist_factor -             # Distance matters
+            0.85 * safety_score +            # Safety dominates
+            0.10 * progress_factor +         # Minor forward progress bonus
+            0.05 * dist_factor -             # Minor distance factor
             back_pass_penalty                # Small penalty for going backward
         )
-        
-        # Ensure safe passes get a baseline score that can compete with dribbling
-        if safety_score > 0.7:
-            score += 0.15  # Bonus for very safe passes
         
         return max(0.0, score)
 
@@ -689,10 +700,27 @@ class Player:
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
     def _execute_dribble(self, ctx, game, direction):
-        """Execute dribbling - give ball a small kick in movement direction."""
-        self.vel = direction * BALL_DRIBBLE_SPEED
-        # Dribble is a small kick - ball gets velocity in the dribble direction
-        game.ball.vel = direction * BALL_DRIBBLE_SPEED * 1.5  # Ball moves slightly faster than player
+        """Execute dribbling as short kicks - ball is released ahead, player chases it."""
+        # Release ball ownership - this is a kick, not attached ball
+        self.has_ball = False
+        game.ball.owner_id = None
+        
+        # Set touch cooldown - cannot reacquire ball for DRIBBLE_TOUCH_INTERVAL ticks
+        # Each tick is 0.1 time units, so multiply by 0.1
+        self.touch_cooldown_until = game.time + (DRIBBLE_TOUCH_INTERVAL * 0.1)
+        
+        # Kick ball ahead by DRIBBLE_TOUCH_DISTANCE in the movement direction
+        kick_distance = DRIBBLE_TOUCH_DISTANCE
+        game.ball.pos = self.pos + direction * kick_distance
+        
+        # Give ball velocity faster than player to stay ahead between touches
+        game.ball.vel = direction * PLAYER_SPRINT_SPEED * 1.2
+        
+        # Player sprints to chase the ball
+        self.vel = direction * PLAYER_SPRINT_SPEED
+        
+        # Track last touch for out-of-bounds decisions
+        game.last_touch = LastTouch(team=self.team, player_id=self.id)
     
     def _execute_clearance(self, ctx, game):
         """Clear the ball upfield away from danger - evaluate safe directions."""
@@ -1266,13 +1294,18 @@ class Game:
             p.has_ball = False
         self.ball.owner_id = None
         
-        # Only assign control if someone is close enough
+        # Only assign control if someone is close enough AND not on touch cooldown
         if min_dist < TACKLE_DISTANCE and closest_players:
-            # Random tiebreaker if multiple players equally close
-            controller = random.choice(closest_players)
-            controller.has_ball = True
-            self.ball.owner_id = controller.id
-            self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
+            # Filter out players still on dribble cooldown
+            eligible_players = [p for p in closest_players if p.touch_cooldown_until <= self.time]
+            
+            if eligible_players:
+                # Random tiebreaker if multiple players equally close
+                controller = random.choice(eligible_players)
+                controller.has_ball = True
+                controller.touch_cooldown_until = 0.0  # Reset cooldown on ball acquisition
+                self.ball.owner_id = controller.id
+                self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
         
         # Update Players - each player makes a decision
         for p in self.players:
