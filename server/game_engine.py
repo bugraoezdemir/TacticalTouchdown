@@ -523,8 +523,8 @@ class Player:
         target_goal_dist = distance_to_goal(target_pos, ctx.team)
         is_back_pass = target_goal_dist > my_goal_dist + 3.0
         
-        # Back passes get a progress penalty but are still evaluated fully
-        back_pass_penalty = 0.15 if is_back_pass else 0.0
+        # Back passes get a small progress penalty but are still evaluated fully
+        back_pass_penalty = 0.05 if is_back_pass else 0.0
         
         # GEOMETRIC INTERCEPTION CHECK
         # Calculate ball travel time
@@ -551,21 +551,21 @@ class Player:
             
             if time_margin < 0.5:  # Opponent arrives within 0.5 time units of ball
                 can_be_intercepted = True
-                # Risk increases as margin decreases
-                risk_factor = max(0, 1.0 - time_margin)
+                # Risk increases as margin decreases - CLAMP to [0,1]
+                risk_factor = min(1.0, max(0.0, 1.0 - time_margin))
                 interception_risk = max(interception_risk, risk_factor)
         
         # CHECK RECEIVER SAFETY - is opponent close to the receiving teammate?
         receiver_safety = 1.0
         for opp_pos in ctx.opponent_positions:
             dist_opp_to_receiver = np.linalg.norm(opp_pos - target_pos)
-            if dist_opp_to_receiver < 5.0:
-                # Opponent is very close to receiver - risky
-                receiver_safety = min(receiver_safety, dist_opp_to_receiver / 5.0)
+            if dist_opp_to_receiver < 4.0:
+                # Opponent is close to receiver - reduce safety
+                receiver_safety = min(receiver_safety, dist_opp_to_receiver / 4.0)
         
-        # Calculate base safety score - combine path safety and receiver safety
-        path_safety = 1.0 - interception_risk if can_be_intercepted else 1.0
-        safety_score = path_safety * receiver_safety
+        # Calculate base safety score - WEIGHTED AVERAGE not product
+        path_safety = max(0.0, 1.0 - interception_risk) if can_be_intercepted else 1.0
+        safety_score = 0.6 * path_safety + 0.4 * receiver_safety
         
         # ROLE-BASED RISK TOLERANCE
         if self.role == 'DEF' and (can_be_intercepted or receiver_safety < 0.5):
@@ -585,13 +585,17 @@ class Player:
         else:
             dist_factor = max(0.3, 1.0 - (pass_dist - 25.0) / 25.0)
         
-        # REBALANCED SCORING: Safety is DOMINANT (70%), progress and distance minor
+        # BALANCED SCORING: Safety important but passes must beat dribble scores
         score = (
-            0.70 * safety_score +           # Safety is most important
-            0.15 * progress_factor +         # Forward progress is nice but not critical
-            0.15 * dist_factor -             # Distance is minor factor
-            back_pass_penalty                # Mild penalty for going backward
+            0.50 * safety_score +           # Safety is important
+            0.25 * progress_factor +         # Forward progress matters
+            0.25 * dist_factor -             # Distance matters
+            back_pass_penalty                # Small penalty for going backward
         )
+        
+        # Ensure safe passes get a baseline score that can compete with dribbling
+        if safety_score > 0.7:
+            score += 0.15  # Bonus for very safe passes
         
         return max(0.0, score)
 
