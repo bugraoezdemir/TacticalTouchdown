@@ -40,7 +40,11 @@ const BallDot = ({ ball }: { ball: Ball }) => {
 };
 
 export default function Pitch() {
-  const { players, ball, isPlaying, tick, gameSpeed } = useGameStore();
+  const { players, ball, isPlaying, tick, gameSpeed, init } = useGameStore();
+
+  useEffect(() => {
+    init();
+  }, []);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
