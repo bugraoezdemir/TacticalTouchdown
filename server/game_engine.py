@@ -39,6 +39,10 @@ PASS_SCORE_THRESHOLD = 0.15   # Was 0.3 - pass more often
 # Home position attraction weight
 HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
 
+# Dribble touch system
+DRIBBLE_TOUCH_INTERVAL = 5  # Every N ticks, ball moves ahead
+DRIBBLE_TOUCH_DISTANCE = 1.5  # How far ball moves ahead of dribbler
+
 
 class GameState(Enum):
     PLAYING = "playing"
@@ -496,6 +500,7 @@ class Game:
         self.restart_pos = np.array([50.0, 50.0])
         self.restart_team = 'home'
         self.last_ball_pos = np.array([50.0, 50.0])  # Track last in-bounds position
+        self.dribble_tick = 0  # Counter for dribble touch system
         self.init_players()
 
     def init_players(self):
@@ -550,7 +555,40 @@ class Game:
         else:
             owner = next((p for p in self.players if p.id == self.ball.owner_id), None)
             if owner:
-                self.ball.pos = owner.pos.copy()
+                # Check if opponent is pressuring the ball carrier (tackle attempt)
+                for p in self.players:
+                    if p.team != owner.team:
+                        dist = np.linalg.norm(p.pos - owner.pos)
+                        if dist <= TACKLE_DISTANCE:
+                            # 30% chance to steal when pressing - higher than old 15%
+                            if random.random() < 0.30:
+                                owner.has_ball = False
+                                self.ball.owner_id = p.id
+                                p.has_ball = True
+                                self.ball.pos = p.pos.copy()
+                                self.last_touch = LastTouch(team=p.team, player_id=p.id)
+                                self.dribble_tick = 0
+                                break
+                
+                # If still has ball, apply dribble touch system
+                if self.ball.owner_id == owner.id:
+                    self.dribble_tick += 1
+                    if self.dribble_tick >= DRIBBLE_TOUCH_INTERVAL:
+                        self.dribble_tick = 0
+                        # Push ball ahead in dribble direction
+                        if np.linalg.norm(owner.vel) > 0.1:
+                            dribble_dir = normalize(owner.vel)
+                            self.ball.pos = owner.pos + dribble_dir * DRIBBLE_TOUCH_DISTANCE
+                            # Ball becomes loose - clear ownership
+                            owner.has_ball = False
+                            self.ball.owner_id = None
+                            self.ball.vel = dribble_dir * 0.3  # Small momentum
+                        else:
+                            # Standing still - ball stays with player
+                            self.ball.pos = owner.pos.copy()
+                    else:
+                        # Between touches - ball follows player closely
+                        self.ball.pos = owner.pos.copy()
         
         # Detect ball events
         event = self._detect_ball_event()
@@ -561,24 +599,23 @@ class Game:
         # Update Players
         for p in self.players:
             p.make_decision(self)
+        
+        # Proximity-based ball ownership: closest player gets the loose ball
+        if self.ball.owner_id is None:
+            closest_player = None
+            min_dist = float('inf')
+            for p in self.players:
+                dist = np.linalg.norm(p.pos - self.ball.pos)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_player = p
             
-            # Ball pickup/steal logic
-            if self.ball.owner_id is None:
-                dist = np.linalg.norm(p.pos - self.ball.pos)
-                if dist < TACKLE_DISTANCE:
-                    self.ball.owner_id = p.id
-                    p.has_ball = True
-                    self.ball.vel = np.zeros(2)
-                    self.last_touch = LastTouch(team=p.team, player_id=p.id)
-            elif self.ball.owner_id != p.id:
-                dist = np.linalg.norm(p.pos - self.ball.pos)
-                owner = next((pl for pl in self.players if pl.id == self.ball.owner_id), None)
-                if owner and owner.team != p.team and dist < TACKLE_DISTANCE:
-                    if random.random() < 0.15:
-                        owner.has_ball = False
-                        self.ball.owner_id = p.id
-                        p.has_ball = True
-                        self.last_touch = LastTouch(team=p.team, player_id=p.id)
+            # Only pick up if within tackle distance
+            if closest_player and min_dist < TACKLE_DISTANCE:
+                closest_player.has_ball = True
+                self.ball.owner_id = closest_player.id
+                self.ball.vel = np.zeros(2)
+                self.last_touch = LastTouch(team=closest_player.team, player_id=closest_player.id)
 
     def _detect_ball_event(self):
         """Detect if ball went out of play. Returns event type or None."""
