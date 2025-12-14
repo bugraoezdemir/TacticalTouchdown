@@ -421,7 +421,7 @@ class Player:
         if self.role == 'GK':
             # Goalkeeper stays in goal area, tracks ball
             goal_x = 5.0 if self.team == 'home' else 95.0
-            target_y = np.clip(game.ball.pos[1], 40, 60)
+            target_y = np.clip(ctx.game.ball.pos[1], 40, 60)
             target = np.array([goal_x, target_y])
         else:
             # Field players: position between ball and goal
