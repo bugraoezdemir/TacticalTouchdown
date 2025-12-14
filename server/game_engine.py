@@ -25,7 +25,7 @@ BALL_FRICTION = 0.95
 PASS_SAFETY_WEIGHT = 0.5       # Was 0.4 - value safe passes more
 PASS_GOAL_PROGRESS_WEIGHT = 0.4 # Was 0.3 - value forward progress more
 PASS_DISTANCE_WEIGHT = 0.3
-SPACE_PASS_BONUS = 0.2  # Bonus for passing to space ahead of running teammates
+SPACE_PASS_BONUS = 0.0  # Disabled - prefer direct passes to teammates
 
 DRIBBLE_CLEARANCE_WEIGHT = 0.35  # Reduced - dribble less
 DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.35  # Reduced - favor passing
@@ -34,7 +34,7 @@ SHOOT_DISTANCE_THRESHOLD = 35.0  # Increased from 25 - shoot from further
 SHOOT_ANGLE_THRESHOLD = 30.0
 
 # Lowered thresholds for actions
-SHOOT_SCORE_THRESHOLD = 0.20  # Low threshold - shoot when opportunity arises
+SHOOT_SCORE_THRESHOLD = 0.10  # Very low threshold - shoot frequently when chance arises
 PASS_SCORE_THRESHOLD = 0.15   # Only pass if it's a decent option (no back passes)
 
 # Increased pass appeal, reduced dribble appeal
@@ -499,31 +499,9 @@ class Player:
             direct_score = self._evaluate_pass_to_target(ctx, teammate.pos, teammate)
             direct_target = teammate.pos.copy()
             
-            # Evaluate "space pass" - passing ahead of running teammates
-            space_score = 0.0
-            space_target = None
-            if np.linalg.norm(teammate.vel) > 0.2:
-                # Calculate lead position 10-15 units ahead of teammate's run
-                teammate_dir = normalize(teammate.vel)
-                lead_pos = teammate.pos + teammate_dir * 12.0  # 12 units ahead
-                
-                # Make sure lead position is on field and toward goal
-                lead_pos[0] = np.clip(lead_pos[0], 5, 95)
-                lead_pos[1] = np.clip(lead_pos[1], 5, 95)
-                
-                # Check if space pass makes progress toward goal
-                lead_goal_dist = distance_to_goal(lead_pos, ctx.team)
-                if lead_goal_dist < distance_to_goal(teammate.pos, ctx.team):
-                    space_score = self._evaluate_pass_to_target(ctx, lead_pos, teammate) + SPACE_PASS_BONUS
-                    space_target = lead_pos
-            
-            # Use the better of direct pass or space pass
-            if space_score > direct_score and space_target is not None:
-                score = space_score
-                target = space_target
-            else:
-                score = direct_score
-                target = direct_target
+            # Always use direct pass to teammate (simpler, more reliable)
+            score = direct_score
+            target = direct_target
             
             if score > best_score:
                 best_score = score
@@ -655,11 +633,19 @@ class Player:
         return best_dir, best_score
 
     def _execute_shoot(self, ctx, game):
-        """Execute a shot on goal."""
+        """Execute a shot on goal - target corners away from goalkeeper."""
         self.has_ball = False
         game.ball.owner_id = None
         
-        target_y = 50.0 + (random.random() - 0.5) * 8
+        # Target goal corners (GOAL_TOP=40, GOAL_BOTTOM=60) instead of center
+        # Randomly pick upper or lower corner, with slight variation
+        if random.random() < 0.5:
+            # Upper corner - aim just inside top post
+            target_y = GOAL_TOP + random.uniform(1.0, 3.0)
+        else:
+            # Lower corner - aim just inside bottom post
+            target_y = GOAL_BOTTOM - random.uniform(1.0, 3.0)
+        
         target = np.array([ctx.goal_x, target_y])
         
         shoot_dir = normalize(target - self.pos)
