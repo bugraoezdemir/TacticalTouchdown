@@ -63,48 +63,64 @@ class LastTouch:
     player_id: int
 
 
-# Home positions for each role combination
+# Home positions for each role combination (11v11 4-4-2 formation)
 # Format: (lateral_role, longitudinal_role, team) -> (x, y)
 ROLE_HOME_POSITIONS = {
-    # Home team (attacking right toward x=100)
+    # Home team (attacking right toward x=100) - 4-4-2 formation
     ('center', 'goalkeeper', 'home'): (5, 50),
-    ('left', 'back', 'home'): (20, 20),
-    ('center', 'back', 'home'): (20, 50),
-    ('right', 'back', 'home'): (20, 80),
-    ('left', 'midfielder', 'home'): (45, 25),
-    ('right', 'midfielder', 'home'): (45, 75),
-    ('center', 'forward', 'home'): (65, 50),
+    ('left', 'back', 'home'): (18, 15),
+    ('center_left', 'back', 'home'): (18, 38),
+    ('center_right', 'back', 'home'): (18, 62),
+    ('right', 'back', 'home'): (18, 85),
+    ('left', 'midfielder', 'home'): (40, 15),
+    ('center_left', 'midfielder', 'home'): (42, 38),
+    ('center_right', 'midfielder', 'home'): (42, 62),
+    ('right', 'midfielder', 'home'): (40, 85),
+    ('left', 'forward', 'home'): (65, 35),
+    ('right', 'forward', 'home'): (65, 65),
     
-    # Away team (attacking left toward x=0)
+    # Away team (attacking left toward x=0) - 4-4-2 formation
     ('center', 'goalkeeper', 'away'): (95, 50),
-    ('left', 'back', 'away'): (80, 80),
-    ('center', 'back', 'away'): (80, 50),
-    ('right', 'back', 'away'): (80, 20),
-    ('left', 'midfielder', 'away'): (55, 75),
-    ('right', 'midfielder', 'away'): (55, 25),
-    ('center', 'forward', 'away'): (35, 50),
+    ('left', 'back', 'away'): (82, 85),
+    ('center_left', 'back', 'away'): (82, 62),
+    ('center_right', 'back', 'away'): (82, 38),
+    ('right', 'back', 'away'): (82, 15),
+    ('left', 'midfielder', 'away'): (60, 85),
+    ('center_left', 'midfielder', 'away'): (58, 62),
+    ('center_right', 'midfielder', 'away'): (58, 38),
+    ('right', 'midfielder', 'away'): (60, 15),
+    ('left', 'forward', 'away'): (35, 65),
+    ('right', 'forward', 'away'): (35, 35),
 }
 
 # Zone bounds for each role - (x_min, x_max, y_min, y_max)
-# Players should stay mostly within their zone
+# Players should stay mostly within their zone (11v11 4-4-2)
 ROLE_ZONE_BOUNDS = {
     # Home team zones (attacking toward x=100)
     ('center', 'goalkeeper', 'home'): (0, 20, 30, 70),
-    ('left', 'back', 'home'): (5, 45, 0, 40),
-    ('center', 'back', 'home'): (5, 45, 25, 75),
-    ('right', 'back', 'home'): (5, 45, 60, 100),
-    ('left', 'midfielder', 'home'): (25, 75, 0, 45),
-    ('right', 'midfielder', 'home'): (25, 75, 55, 100),
-    ('center', 'forward', 'home'): (40, 100, 20, 80),
+    ('left', 'back', 'home'): (5, 45, 0, 30),
+    ('center_left', 'back', 'home'): (5, 45, 20, 50),
+    ('center_right', 'back', 'home'): (5, 45, 50, 80),
+    ('right', 'back', 'home'): (5, 45, 70, 100),
+    ('left', 'midfielder', 'home'): (25, 75, 0, 30),
+    ('center_left', 'midfielder', 'home'): (25, 75, 25, 55),
+    ('center_right', 'midfielder', 'home'): (25, 75, 45, 75),
+    ('right', 'midfielder', 'home'): (25, 75, 70, 100),
+    ('left', 'forward', 'home'): (40, 100, 15, 55),
+    ('right', 'forward', 'home'): (40, 100, 45, 85),
     
     # Away team zones (attacking toward x=0)
     ('center', 'goalkeeper', 'away'): (80, 100, 30, 70),
-    ('left', 'back', 'away'): (55, 95, 60, 100),
-    ('center', 'back', 'away'): (55, 95, 25, 75),
-    ('right', 'back', 'away'): (55, 95, 0, 40),
-    ('left', 'midfielder', 'away'): (25, 75, 55, 100),
-    ('right', 'midfielder', 'away'): (25, 75, 0, 45),
-    ('center', 'forward', 'away'): (0, 60, 20, 80),
+    ('left', 'back', 'away'): (55, 95, 70, 100),
+    ('center_left', 'back', 'away'): (55, 95, 50, 80),
+    ('center_right', 'back', 'away'): (55, 95, 20, 50),
+    ('right', 'back', 'away'): (55, 95, 0, 30),
+    ('left', 'midfielder', 'away'): (25, 75, 70, 100),
+    ('center_left', 'midfielder', 'away'): (25, 75, 45, 75),
+    ('center_right', 'midfielder', 'away'): (25, 75, 25, 55),
+    ('right', 'midfielder', 'away'): (25, 75, 0, 30),
+    ('left', 'forward', 'away'): (0, 60, 45, 85),
+    ('right', 'forward', 'away'): (0, 60, 15, 55),
 }
 
 # Zone weight by role - how strongly to enforce staying in zone
@@ -313,6 +329,18 @@ class Player:
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
         
+        # DEFENDER SAFETY CHECK: Clear if pass is risky or under pressure
+        if self.role == 'DEF':
+            min_opp_dist = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                d = np.linalg.norm(opp_pos - self.pos)
+                min_opp_dist = min(min_opp_dist, float(d))
+            
+            # Clear if: pass score is low OR opponent is close
+            if pass_score < 0.5 or min_opp_dist < 12.0:
+                self._execute_clearance(ctx, game)
+                return
+        
         # Attackers in shooting range should prefer dribble/shoot unless pass is very safe
         in_shooting_range = ctx.dist_to_goal < 30.0
         is_attacker = self.role in ['FWD', 'MID']
@@ -427,7 +455,7 @@ class Player:
         return best_teammate, best_target, best_score
     
     def _evaluate_pass_to_target(self, ctx, target_pos, teammate):
-        """Evaluate a pass to a specific target position."""
+        """Evaluate a pass to a specific target position with strict interception analysis."""
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
         
@@ -437,22 +465,58 @@ class Player:
         # Check if this is a back pass (toward own goal)
         my_goal_dist = ctx.dist_to_goal
         target_goal_dist = distance_to_goal(target_pos, ctx.team)
-        is_back_pass = target_goal_dist > my_goal_dist + 3.0  # More than 3 units backward
+        is_back_pass = target_goal_dist > my_goal_dist + 3.0
         
-        # Heavily penalize back passes - return very low score
         if is_back_pass:
-            return 0.05  # Almost never choose back pass
+            return 0.05
         
-        safety_score = 1.0
+        # GEOMETRIC INTERCEPTION CHECK
+        # Calculate ball travel time
+        ball_travel_time = pass_dist / BALL_PASS_SPEED
+        
+        # Check each opponent's ability to intercept
+        interception_risk = 0.0
+        can_be_intercepted = False
+        
         for opp_pos in ctx.opponent_positions:
-            can_intercept, time_margin = time_to_intercept(
-                opp_pos, PLAYER_SPRINT_SPEED,
-                self.pos, target_pos, BALL_PASS_SPEED
-            )
-            if can_intercept:
-                safety_score *= max(0.1, float(0.5 + time_margin))
+            # Find closest point on pass path to opponent
+            closest_on_path = project_point_to_segment(opp_pos, self.pos, target_pos)
+            dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
+            
+            # Calculate how far along the path this intercept point is
+            dist_along_path = np.linalg.norm(closest_on_path - self.pos)
+            time_ball_reaches_point = dist_along_path / BALL_PASS_SPEED
+            
+            # Time for opponent to reach intercept point
+            time_opp_reaches_point = dist_to_path / PLAYER_SPRINT_SPEED
+            
+            # If opponent can reach the ball path before ball arrives - DANGEROUS
+            time_margin = time_ball_reaches_point - time_opp_reaches_point
+            
+            if time_margin < 0.5:  # Opponent arrives within 0.5 time units of ball
+                can_be_intercepted = True
+                # Risk increases as margin decreases
+                risk_factor = max(0, 1.0 - time_margin)
+                interception_risk = max(interception_risk, risk_factor)
         
-        # Progress factor - only for forward passes
+        # Calculate base safety score
+        if can_be_intercepted:
+            safety_score = max(0.05, 1.0 - interception_risk)
+        else:
+            safety_score = 1.0
+        
+        # ROLE-BASED RISK TOLERANCE - HARD GATES for defenders
+        # Defenders and GK: if ANY interception risk, return 0 to force clearance
+        if self.role == 'DEF' and can_be_intercepted:
+            return 0.0  # Defenders NEVER make interceptable passes
+        if self.role == 'GK' and (can_be_intercepted or interception_risk > 0.1):
+            return 0.0  # GK NEVER makes risky passes
+        
+        # For other roles, apply penalties
+        if can_be_intercepted:
+            safety_score *= 0.3  # Significant penalty but still possible
+        
+        # Progress factor
         progress_factor = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
         progress_factor = float(np.clip(progress_factor, 0, 1))
         
@@ -467,7 +531,6 @@ class Player:
             PASS_BONUS
         )
         
-        # Extra bonus for passing to moving teammates
         if np.linalg.norm(teammate.vel) > 0.3:
             score += 0.1
         
@@ -865,31 +928,39 @@ class Game:
 
     def init_players(self):
         self.players = []
-        # HOME TEAM (4-2-1 formation for 7 players)
+        # HOME TEAM (4-4-2 formation - 11 players)
         self.players.append(Player(1, 'home', 'GK', 5, 50, 1, 'center', 'goalkeeper'))
-        self.players.append(Player(2, 'home', 'DEF', 20, 20, 4, 'left', 'back'))
-        self.players.append(Player(3, 'home', 'DEF', 20, 50, 5, 'center', 'back'))
-        self.players.append(Player(4, 'home', 'DEF', 20, 80, 3, 'right', 'back'))
-        self.players.append(Player(5, 'home', 'MID', 40, 30, 8, 'left', 'midfielder'))
-        self.players.append(Player(6, 'home', 'MID', 40, 70, 6, 'right', 'midfielder'))
-        self.players.append(Player(7, 'home', 'FWD', 60, 50, 9, 'center', 'forward'))
+        self.players.append(Player(2, 'home', 'DEF', 18, 15, 2, 'left', 'back'))
+        self.players.append(Player(3, 'home', 'DEF', 18, 38, 4, 'center_left', 'back'))
+        self.players.append(Player(4, 'home', 'DEF', 18, 62, 5, 'center_right', 'back'))
+        self.players.append(Player(5, 'home', 'DEF', 18, 85, 3, 'right', 'back'))
+        self.players.append(Player(6, 'home', 'MID', 40, 15, 11, 'left', 'midfielder'))
+        self.players.append(Player(7, 'home', 'MID', 42, 38, 8, 'center_left', 'midfielder'))
+        self.players.append(Player(8, 'home', 'MID', 42, 62, 6, 'center_right', 'midfielder'))
+        self.players.append(Player(9, 'home', 'MID', 40, 85, 7, 'right', 'midfielder'))
+        self.players.append(Player(10, 'home', 'FWD', 65, 35, 9, 'left', 'forward'))
+        self.players.append(Player(11, 'home', 'FWD', 65, 65, 10, 'right', 'forward'))
         
-        # AWAY TEAM
-        self.players.append(Player(11, 'away', 'GK', 95, 50, 1, 'center', 'goalkeeper'))
-        self.players.append(Player(12, 'away', 'DEF', 80, 80, 4, 'left', 'back'))
-        self.players.append(Player(13, 'away', 'DEF', 80, 50, 5, 'center', 'back'))
-        self.players.append(Player(14, 'away', 'DEF', 80, 20, 3, 'right', 'back'))
-        self.players.append(Player(15, 'away', 'MID', 60, 75, 8, 'left', 'midfielder'))
-        self.players.append(Player(16, 'away', 'MID', 60, 25, 6, 'right', 'midfielder'))
-        self.players.append(Player(17, 'away', 'FWD', 40, 50, 9, 'center', 'forward'))
+        # AWAY TEAM (4-4-2 formation - 11 players)
+        self.players.append(Player(21, 'away', 'GK', 95, 50, 1, 'center', 'goalkeeper'))
+        self.players.append(Player(22, 'away', 'DEF', 82, 85, 2, 'left', 'back'))
+        self.players.append(Player(23, 'away', 'DEF', 82, 62, 4, 'center_left', 'back'))
+        self.players.append(Player(24, 'away', 'DEF', 82, 38, 5, 'center_right', 'back'))
+        self.players.append(Player(25, 'away', 'DEF', 82, 15, 3, 'right', 'back'))
+        self.players.append(Player(26, 'away', 'MID', 60, 85, 11, 'left', 'midfielder'))
+        self.players.append(Player(27, 'away', 'MID', 58, 62, 8, 'center_left', 'midfielder'))
+        self.players.append(Player(28, 'away', 'MID', 58, 38, 6, 'center_right', 'midfielder'))
+        self.players.append(Player(29, 'away', 'MID', 60, 15, 7, 'right', 'midfielder'))
+        self.players.append(Player(30, 'away', 'FWD', 35, 65, 9, 'left', 'forward'))
+        self.players.append(Player(31, 'away', 'FWD', 35, 35, 10, 'right', 'forward'))
 
         # Give ball to Home FWD for kickoff
-        self.ball.owner_id = 7
+        self.ball.owner_id = 10
         self.ball.pos = np.array([50.0, 50.0])
-        self.players[6].has_ball = True
-        self.players[6].pos = np.array([50.0, 50.0])
+        self.players[9].has_ball = True  # Index 9 is the first home forward
+        self.players[9].pos = np.array([50.0, 50.0])
         self.state = GameState.PLAYING
-        self.last_touch = LastTouch(team='home', player_id=7)
+        self.last_touch = LastTouch(team='home', player_id=10)
 
     def iterate(self):
         self.time += 0.1
@@ -989,8 +1060,8 @@ class Game:
         """Check if a goalkeeper can save an incoming shot."""
         ball_speed = np.linalg.norm(self.ball.vel)
         
-        # Only check saves for fast-moving balls (shots)
-        if ball_speed < 1.5:
+        # Check for any moving ball (lowered threshold for friction-affected balls)
+        if ball_speed < 0.8:
             return
         
         # Don't attempt saves if ball already crossed goal line
@@ -1005,16 +1076,22 @@ class Game:
             # Calculate distance to ball
             dist_to_ball = np.linalg.norm(p.pos - self.ball.pos)
             
-            # GK can only save if ball is close
-            if dist_to_ball > 5.0:
+            # GK can save if ball is within reach (increased from 5 to 8)
+            if dist_to_ball > 8.0:
                 continue
             
             # Check if ball is heading toward GK's goal
             if p.team == 'home':
-                if self.ball.vel[0] > 0:  # Ball going away from home goal
+                if self.ball.vel[0] > 0.1:  # Ball going away from home goal
+                    continue
+                # Ball must be in goal area (x < 20)
+                if self.ball.pos[0] > 20:
                     continue
             else:
-                if self.ball.vel[0] < 0:  # Ball going away from away goal
+                if self.ball.vel[0] < -0.1:  # Ball going away from away goal
+                    continue
+                # Ball must be in goal area (x > 80)
+                if self.ball.pos[0] < 80:
                     continue
             
             # Calculate save difficulty based on:
@@ -1025,8 +1102,8 @@ class Game:
             # Speed difficulty: faster shots are harder
             speed_difficulty = min(ball_speed / 3.0, 1.0)
             
-            # Distance factor: closer is easier to save
-            distance_factor = 1.0 - (dist_to_ball / 5.0)
+            # Distance factor: closer is easier to save (updated for 8 unit range)
+            distance_factor = 1.0 - (dist_to_ball / 8.0)
             
             # Corner difficulty: shots toward goal corners are harder
             goal_y_center = 50.0
