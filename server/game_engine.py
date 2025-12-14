@@ -85,6 +85,36 @@ ROLE_HOME_POSITIONS = {
     ('center', 'forward', 'away'): (35, 50),
 }
 
+# Zone bounds for each role - (x_min, x_max, y_min, y_max)
+# Players should stay mostly within their zone
+ROLE_ZONE_BOUNDS = {
+    # Home team zones (attacking toward x=100)
+    ('center', 'goalkeeper', 'home'): (0, 20, 30, 70),
+    ('left', 'back', 'home'): (5, 45, 0, 40),
+    ('center', 'back', 'home'): (5, 45, 25, 75),
+    ('right', 'back', 'home'): (5, 45, 60, 100),
+    ('left', 'midfielder', 'home'): (25, 75, 0, 45),
+    ('right', 'midfielder', 'home'): (25, 75, 55, 100),
+    ('center', 'forward', 'home'): (40, 100, 20, 80),
+    
+    # Away team zones (attacking toward x=0)
+    ('center', 'goalkeeper', 'away'): (80, 100, 30, 70),
+    ('left', 'back', 'away'): (55, 95, 60, 100),
+    ('center', 'back', 'away'): (55, 95, 25, 75),
+    ('right', 'back', 'away'): (55, 95, 0, 40),
+    ('left', 'midfielder', 'away'): (25, 75, 55, 100),
+    ('right', 'midfielder', 'away'): (25, 75, 0, 45),
+    ('center', 'forward', 'away'): (0, 60, 20, 80),
+}
+
+# Zone weight by role - how strongly to enforce staying in zone
+ZONE_WEIGHT_BY_ROLE = {
+    'GK': 1.0,   # GK must stay in zone
+    'DEF': 0.7,  # Defenders fairly strict
+    'MID': 0.4,  # Midfielders more flexible
+    'FWD': 0.3,  # Forwards most free to roam
+}
+
 
 def normalize(v):
     """Normalize a vector, return zero vector if magnitude is zero."""
@@ -224,6 +254,15 @@ class Player:
             self.home_pos = np.array([float(home[0]), float(home[1])])
         else:
             self.home_pos = self.pos.copy()
+        
+        # Set zone bounds
+        if role_key in ROLE_ZONE_BOUNDS:
+            self.zone_bounds = ROLE_ZONE_BOUNDS[role_key]
+        else:
+            self.zone_bounds = (0, 100, 0, 100)  # Full field as fallback
+        
+        # Zone weight based on role
+        self.zone_weight = ZONE_WEIGHT_BY_ROLE.get(role, 0.5)
     
     def to_dict(self):
         return {
@@ -508,28 +547,62 @@ class Player:
                     ball_owner = p
                     break
         
-        # When ball is loose, chase it directly (no blending)
+        # When ball is loose, determine if we should chase or hold position
         if ball_owner is None:
             to_ball = game.ball.pos - self.pos
-            dist = np.linalg.norm(to_ball)
-            if dist > 1.0:
-                self.vel = normalize(to_ball) * PLAYER_SPRINT_SPEED
+            my_dist = np.linalg.norm(to_ball)
+            
+            # Check if ball is in our zone
+            ball_in_zone = self._is_in_zone(game.ball.pos)
+            
+            # Check if we're one of the closest teammates
+            closer_teammates = sum(1 for t in ctx.teammates 
+                                   if np.linalg.norm(t.pos - game.ball.pos) < my_dist - 3.0)
+            
+            # Check opponent proximity to ball
+            closest_opp_dist = 100.0
+            for opp_pos in ctx.opponent_positions:
+                d = np.linalg.norm(opp_pos - game.ball.pos)
+                closest_opp_dist = min(float(closest_opp_dist), float(d))
+            
+            # Decide whether to chase based on multiple factors
+            should_chase = False
+            if my_dist < 8.0:  # Very close - always chase
+                should_chase = True
+            elif ball_in_zone and closer_teammates == 0:  # In our zone and we're closest teammate
+                should_chase = True
+            elif my_dist < closest_opp_dist and closer_teammates == 0:  # We can get there before opponent
+                should_chase = True
+            
+            if should_chase:
+                if my_dist > 1.0:
+                    chase_target = self._clamp_to_zone(game.ball.pos)
+                    to_target = chase_target - self.pos
+                    self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
+                else:
+                    self.vel = np.zeros(2)
             else:
-                self.vel = np.zeros(2)
+                # Return toward home position
+                to_home = self.home_pos - self.pos
+                if np.linalg.norm(to_home) > 2.0:
+                    self.vel = normalize(to_home) * PLAYER_SPEED
+                else:
+                    self.vel = np.zeros(2)
             return
         
         # Calculate tactical target when ball is owned
-        tactical_target = None
         if ball_owner.team == self.team:
-            tactical_target = self._get_support_target(ctx, ball_owner)
+            tactical_target = self._find_support_spot(ctx, ball_owner, game)
         else:
             tactical_target = self._get_defend_target(ctx, ball_owner)
         
-        # Blend tactical target with home position (70% tactical, 30% home)
-        if tactical_target is not None:
-            blended_target = (1 - HOME_POSITION_WEIGHT) * tactical_target + HOME_POSITION_WEIGHT * self.home_pos
-        else:
-            blended_target = self.home_pos
+        # Clamp target to zone with role-based flexibility
+        clamped_target = self._clamp_to_zone(tactical_target)
+        
+        # Blend with home position - use HOME_POSITION_WEIGHT scaled by role's zone_weight
+        # Defenders blend more toward home, attackers follow tactical target more
+        home_blend = HOME_POSITION_WEIGHT * self.zone_weight
+        blended_target = (1 - home_blend) * clamped_target + home_blend * self.home_pos
         
         # Move towards blended target
         to_target = blended_target - self.pos
@@ -539,22 +612,106 @@ class Player:
             self.vel = normalize(to_target) * PLAYER_SPEED
         else:
             self.vel = np.zeros(2)
+    
+    def _is_in_zone(self, pos):
+        """Check if a position is within this player's zone."""
+        x_min, x_max, y_min, y_max = self.zone_bounds
+        return x_min <= pos[0] <= x_max and y_min <= pos[1] <= y_max
+    
+    def _clamp_to_zone(self, pos):
+        """Clamp a position to be within zone bounds."""
+        x_min, x_max, y_min, y_max = self.zone_bounds
+        return np.array([
+            np.clip(pos[0], x_min, x_max),
+            np.clip(pos[1], y_min, y_max)
+        ])
 
-    def _get_support_target(self, ctx, ball_owner):
-        """Calculate support position when teammate has ball."""
+    def _find_support_spot(self, ctx, ball_owner, game):
+        """Find best support position - safe for receiving passes, within zone."""
+        # Generate candidate positions (unclamped first)
+        candidates = []
+        
+        # 1. Home position (already in zone)
+        candidates.append(self.home_pos.copy())
+        
+        # 2. Position toward attacking goal from current spot
+        goal_dir = normalize(ctx.goal_center - self.pos)
+        candidates.append(self.pos + goal_dir * 10.0)
+        candidates.append(self.pos + goal_dir * 15.0)
+        
+        # 3. Lateral positions for width
+        perp = np.array([-goal_dir[1], goal_dir[0]])
+        candidates.append(self.pos + perp * 8.0)
+        candidates.append(self.pos - perp * 8.0)
+        candidates.append(self.pos + goal_dir * 8.0 + perp * 6.0)
+        candidates.append(self.pos + goal_dir * 8.0 - perp * 6.0)
+        
+        # 4. Support positions relative to ball carrier
         ball_to_goal = ctx.goal_center - ball_owner.pos
-        ball_to_goal_normalized = normalize(ball_to_goal)
+        ball_dir = normalize(ball_to_goal)
+        ball_perp = np.array([-ball_dir[1], ball_dir[0]])
         
-        perp = np.array([-ball_to_goal_normalized[1], ball_to_goal_normalized[0]])
+        # Side based on current position
+        side = 1 if np.dot(self.pos - ball_owner.pos, ball_perp) > 0 else -1
         
-        my_offset = self.pos - ball_owner.pos
-        side = 1 if np.dot(my_offset, perp) > 0 else -1
+        # Various distances ahead and to the side of ball carrier
+        for dist in [12.0, 18.0, 25.0]:
+            for offset in [8.0, 15.0]:
+                candidates.append(ball_owner.pos + ball_dir * dist + ball_perp * side * offset)
         
-        support_distance = 15.0
-        support_offset = 10.0
-        target = ball_owner.pos + ball_to_goal_normalized * support_distance + perp * side * support_offset
+        # Score each candidate BEFORE clamping
+        best_spot = self.home_pos.copy()
+        best_score = -999.0
         
-        return target
+        for cand in candidates:
+            # Check distance to owner on ORIGINAL candidate
+            dist_to_owner = np.linalg.norm(cand - ball_owner.pos)
+            if dist_to_owner < 8.0 or dist_to_owner > 45.0:
+                continue
+            
+            score = 0.0
+            
+            # 1. Pass safety - can ball reach here without interception?
+            pass_safety = 1.0
+            for opp_pos in ctx.opponent_positions:
+                can_intercept, time_margin = time_to_intercept(
+                    opp_pos, PLAYER_SPRINT_SPEED,
+                    ball_owner.pos, cand, BALL_PASS_SPEED
+                )
+                if can_intercept:
+                    pass_safety *= max(0.1, float(0.5 + time_margin))
+            score += pass_safety * 0.4
+            
+            # 2. Space from opponents
+            min_opp_dist = 100.0
+            for opp_pos in ctx.opponent_positions:
+                d = np.linalg.norm(cand - opp_pos)
+                min_opp_dist = min(float(min_opp_dist), float(d))
+            space_score = min(min_opp_dist / 15.0, 1.0)
+            score += space_score * 0.3
+            
+            # 3. Goal progress - closer to attacking goal is better (for attackers)
+            my_goal_dist = distance_to_goal(self.pos, ctx.team)
+            cand_goal_dist = distance_to_goal(cand, ctx.team)
+            if my_goal_dist > 5:
+                progress = (my_goal_dist - cand_goal_dist) / my_goal_dist
+                score += max(0, progress) * 0.2
+            
+            # 4. Zone adherence bonus (larger bonus for in-zone)
+            if self._is_in_zone(cand):
+                score += 0.15
+            else:
+                # Penalty based on how far outside zone
+                clamped = self._clamp_to_zone(cand)
+                zone_dist = np.linalg.norm(cand - clamped)
+                score -= min(zone_dist / 30.0, 0.2) * self.zone_weight
+            
+            if score > best_score:
+                best_score = score
+                # Clamp the winning spot to zone at the end
+                best_spot = self._clamp_to_zone(cand)
+        
+        return best_spot
 
     def _make_gk_decision(self, ctx, game):
         """Special decision making for goalkeepers - stay near goal, track ball laterally."""
