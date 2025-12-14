@@ -47,6 +47,74 @@ HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
 DRIBBLE_TOUCH_INTERVAL = 5  # Every N ticks, ball moves ahead
 DRIBBLE_TOUCH_DISTANCE = 2.5  # How far ball moves ahead (must be > TACKLE_DISTANCE to allow interception)
 
+# TACTICAL SYSTEM
+
+# Formation templates - defines player positions for each formation
+# Format: formation_name -> list of (role, lateral_role, longitudinal_role, home_x, home_y, jersey_number)
+FORMATIONS = {
+    '4-4-2': [
+        ('GK', 'center', 'goalkeeper', 5, 50, 1),
+        ('DEF', 'left', 'back', 18, 15, 2),
+        ('DEF', 'center_left', 'back', 18, 38, 4),
+        ('DEF', 'center_right', 'back', 18, 62, 5),
+        ('DEF', 'right', 'back', 18, 85, 3),
+        ('MID', 'left', 'midfielder', 40, 15, 11),
+        ('MID', 'center_left', 'midfielder', 42, 38, 8),
+        ('MID', 'center_right', 'midfielder', 42, 62, 6),
+        ('MID', 'right', 'midfielder', 40, 85, 7),
+        ('FWD', 'left', 'forward', 65, 35, 9),
+        ('FWD', 'right', 'forward', 65, 65, 10),
+    ],
+    '4-3-3': [
+        ('GK', 'center', 'goalkeeper', 5, 50, 1),
+        ('DEF', 'left', 'back', 18, 15, 2),
+        ('DEF', 'center_left', 'back', 18, 38, 4),
+        ('DEF', 'center_right', 'back', 18, 62, 5),
+        ('DEF', 'right', 'back', 18, 85, 3),
+        ('MID', 'left', 'midfielder', 42, 25, 8),
+        ('MID', 'center', 'midfielder', 45, 50, 6),
+        ('MID', 'right', 'midfielder', 42, 75, 7),
+        ('FWD', 'left', 'forward', 65, 20, 11),
+        ('FWD', 'center', 'forward', 70, 50, 9),
+        ('FWD', 'right', 'forward', 65, 80, 10),
+    ],
+    '3-5-2': [
+        ('GK', 'center', 'goalkeeper', 5, 50, 1),
+        ('DEF', 'left', 'back', 18, 25, 4),
+        ('DEF', 'center', 'back', 15, 50, 5),
+        ('DEF', 'right', 'back', 18, 75, 2),
+        ('MID', 'left', 'midfielder', 35, 10, 11),
+        ('MID', 'center_left', 'midfielder', 42, 35, 8),
+        ('MID', 'center', 'midfielder', 45, 50, 6),
+        ('MID', 'center_right', 'midfielder', 42, 65, 7),
+        ('MID', 'right', 'midfielder', 35, 90, 3),
+        ('FWD', 'left', 'forward', 65, 40, 9),
+        ('FWD', 'right', 'forward', 65, 60, 10),
+    ],
+    '5-3-2': [
+        ('GK', 'center', 'goalkeeper', 5, 50, 1),
+        ('DEF', 'left', 'back', 20, 10, 11),
+        ('DEF', 'center_left', 'back', 18, 30, 4),
+        ('DEF', 'center', 'back', 15, 50, 5),
+        ('DEF', 'center_right', 'back', 18, 70, 2),
+        ('DEF', 'right', 'back', 20, 90, 3),
+        ('MID', 'left', 'midfielder', 42, 30, 8),
+        ('MID', 'center', 'midfielder', 45, 50, 6),
+        ('MID', 'right', 'midfielder', 42, 70, 7),
+        ('FWD', 'left', 'forward', 65, 40, 9),
+        ('FWD', 'right', 'forward', 65, 60, 10),
+    ],
+}
+
+# Mentality offsets - how much to shift player positions
+# Positive = more attacking (shift toward opponent goal)
+# Negative = more defensive (shift toward own goal)
+MENTALITY_OFFSETS = {
+    'defensive': -10,
+    'normal': 0,
+    'offensive': 10,
+}
+
 
 class GameState(Enum):
     PLAYING = "playing"
@@ -328,6 +396,11 @@ class Player:
         shoot_score = self._evaluate_shoot(ctx)
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
+        
+        # Apply tactical frequency multipliers for home team
+        if self.team == 'home':
+            shoot_score *= game.home_shoot_frequency
+            dribble_score *= game.home_dribble_frequency
         
         # DEFENDER SAFETY CHECK: Clear if pass is risky or under pressure
         if self.role == 'DEF':
@@ -924,36 +997,50 @@ class Game:
         self.restart_pos = np.array([50.0, 50.0])
         self.restart_team = 'home'
         self.last_ball_pos = np.array([50.0, 50.0])  # Track last in-bounds position
+        
+        # Tactical settings for home team (user controlled)
+        self.home_formation = '4-4-2'
+        self.home_mentality = 'normal'
+        self.home_dribble_frequency = 1.0  # 0.5 to 2.0 multiplier
+        self.home_shoot_frequency = 1.0    # 0.5 to 2.0 multiplier
+        
+        # Away team uses fixed tactics
+        self.away_formation = '4-4-2'
+        self.away_mentality = 'normal'
+        
         self.init_players()
 
     def init_players(self):
         self.players = []
-        # HOME TEAM (4-4-2 formation - 11 players)
-        self.players.append(Player(1, 'home', 'GK', 5, 50, 1, 'center', 'goalkeeper'))
-        self.players.append(Player(2, 'home', 'DEF', 18, 15, 2, 'left', 'back'))
-        self.players.append(Player(3, 'home', 'DEF', 18, 38, 4, 'center_left', 'back'))
-        self.players.append(Player(4, 'home', 'DEF', 18, 62, 5, 'center_right', 'back'))
-        self.players.append(Player(5, 'home', 'DEF', 18, 85, 3, 'right', 'back'))
-        self.players.append(Player(6, 'home', 'MID', 40, 15, 11, 'left', 'midfielder'))
-        self.players.append(Player(7, 'home', 'MID', 42, 38, 8, 'center_left', 'midfielder'))
-        self.players.append(Player(8, 'home', 'MID', 42, 62, 6, 'center_right', 'midfielder'))
-        self.players.append(Player(9, 'home', 'MID', 40, 85, 7, 'right', 'midfielder'))
-        self.players.append(Player(10, 'home', 'FWD', 65, 35, 9, 'left', 'forward'))
-        self.players.append(Player(11, 'home', 'FWD', 65, 65, 10, 'right', 'forward'))
         
-        # AWAY TEAM (4-4-2 formation - 11 players)
-        self.players.append(Player(21, 'away', 'GK', 95, 50, 1, 'center', 'goalkeeper'))
-        self.players.append(Player(22, 'away', 'DEF', 82, 85, 2, 'left', 'back'))
-        self.players.append(Player(23, 'away', 'DEF', 82, 62, 4, 'center_left', 'back'))
-        self.players.append(Player(24, 'away', 'DEF', 82, 38, 5, 'center_right', 'back'))
-        self.players.append(Player(25, 'away', 'DEF', 82, 15, 3, 'right', 'back'))
-        self.players.append(Player(26, 'away', 'MID', 60, 85, 11, 'left', 'midfielder'))
-        self.players.append(Player(27, 'away', 'MID', 58, 62, 8, 'center_left', 'midfielder'))
-        self.players.append(Player(28, 'away', 'MID', 58, 38, 6, 'center_right', 'midfielder'))
-        self.players.append(Player(29, 'away', 'MID', 60, 15, 7, 'right', 'midfielder'))
-        self.players.append(Player(30, 'away', 'FWD', 35, 65, 9, 'left', 'forward'))
-        self.players.append(Player(31, 'away', 'FWD', 35, 35, 10, 'right', 'forward'))
-
+        # Create home team from formation template
+        home_formation = FORMATIONS.get(self.home_formation, FORMATIONS['4-4-2'])
+        home_offset = MENTALITY_OFFSETS.get(self.home_mentality, 0)
+        
+        for i, (role, lat, lon, base_x, y, number) in enumerate(home_formation):
+            # Apply mentality offset (except for GK)
+            x = base_x if role == 'GK' else np.clip(base_x + home_offset, 5, 95)
+            player = Player(i + 1, 'home', role, x, y, number, lat, lon)
+            # Update home position with mentality
+            if role != 'GK':
+                player.home_pos[0] = x
+            self.players.append(player)
+        
+        # Create away team (mirror formation)
+        away_formation = FORMATIONS.get(self.away_formation, FORMATIONS['4-4-2'])
+        away_offset = MENTALITY_OFFSETS.get(self.away_mentality, 0)
+        
+        for i, (role, lat, lon, base_x, y, number) in enumerate(away_formation):
+            # Mirror x position and apply mentality (inverted for away team)
+            mirror_x = 100 - base_x
+            x = mirror_x if role == 'GK' else np.clip(mirror_x - away_offset, 5, 95)
+            # Mirror y position for lateral roles
+            mirror_y = 100 - y
+            player = Player(i + 21, 'away', role, x, mirror_y, number, lat, lon)
+            if role != 'GK':
+                player.home_pos[0] = x
+            self.players.append(player)
+        
         # Give ball to Home FWD for kickoff
         self.ball.owner_id = 10
         self.ball.pos = np.array([50.0, 50.0])
@@ -961,6 +1048,69 @@ class Game:
         self.players[9].pos = np.array([50.0, 50.0])
         self.state = GameState.PLAYING
         self.last_touch = LastTouch(team='home', player_id=10)
+    
+    def set_tactics(self, formation=None, mentality=None, dribble_frequency=None, shoot_frequency=None):
+        """Set tactical options for home team. Called by API."""
+        if formation and formation in FORMATIONS:
+            self.home_formation = formation
+        if mentality and mentality in MENTALITY_OFFSETS:
+            self.home_mentality = mentality
+        if dribble_frequency is not None:
+            self.home_dribble_frequency = max(0.5, min(2.0, dribble_frequency))
+        if shoot_frequency is not None:
+            self.home_shoot_frequency = max(0.5, min(2.0, shoot_frequency))
+        
+        # Update player positions based on new tactics
+        self._apply_formation_to_team('home')
+    
+    def _apply_formation_to_team(self, team):
+        """Apply current formation and mentality to a team's players."""
+        if team == 'home':
+            formation = FORMATIONS.get(self.home_formation, FORMATIONS['4-4-2'])
+            offset = MENTALITY_OFFSETS.get(self.home_mentality, 0)
+            start_id = 1
+        else:
+            formation = FORMATIONS.get(self.away_formation, FORMATIONS['4-4-2'])
+            offset = -MENTALITY_OFFSETS.get(self.away_mentality, 0)  # Inverted for away
+            start_id = 21
+        
+        for i, (role, lat, lon, base_x, y, number) in enumerate(formation):
+            player_id = start_id + i
+            player = next((p for p in self.players if p.id == player_id), None)
+            if not player:
+                continue
+            
+            if team == 'away':
+                # Mirror positions for away team
+                base_x = 100 - base_x
+                y = 100 - y
+            
+            # Apply mentality offset (not for GK)
+            new_x = base_x if role == 'GK' else np.clip(base_x + offset, 5, 95)
+            
+            # Update player properties
+            player.role = role
+            player.lateral_role = lat
+            player.longitudinal_role = lon
+            player.number = number
+            player.home_pos = np.array([float(new_x), float(y)])
+            player.zone_weight = ZONE_WEIGHT_BY_ROLE.get(role, 0.5)
+            
+            # Update zone bounds
+            role_key = (lat, lon, team)
+            if role_key in ROLE_ZONE_BOUNDS:
+                player.zone_bounds = ROLE_ZONE_BOUNDS[role_key]
+    
+    def get_tactics(self):
+        """Return current tactical settings for home team."""
+        return {
+            'formation': self.home_formation,
+            'mentality': self.home_mentality,
+            'dribbleFrequency': self.home_dribble_frequency,
+            'shootFrequency': self.home_shoot_frequency,
+            'availableFormations': list(FORMATIONS.keys()),
+            'availableMentalities': list(MENTALITY_OFFSETS.keys()),
+        }
 
     def iterate(self):
         self.time += 0.1
@@ -1264,5 +1414,6 @@ class Game:
             "time": self.time,
             "state": self.state.value,
             "lastTouch": {"team": self.last_touch.team, "playerId": self.last_touch.player_id} if self.last_touch else None,
-            "restartTeam": self.restart_team
+            "restartTeam": self.restart_team,
+            "tactics": self.get_tactics()
         }

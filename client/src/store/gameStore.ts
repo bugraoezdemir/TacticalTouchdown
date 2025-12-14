@@ -31,6 +31,15 @@ export interface LastTouch {
   playerId: number;
 }
 
+export interface Tactics {
+  formation: string;
+  mentality: string;
+  dribbleFrequency: number;
+  shootFrequency: number;
+  availableFormations: string[];
+  availableMentalities: string[];
+}
+
 interface GameStore {
   players: Player[];
   ball: Ball;
@@ -41,13 +50,24 @@ interface GameStore {
   state: GameStateType;
   lastTouch: LastTouch | null;
   restartTeam: Team;
+  tactics: Tactics;
 
   togglePlay: () => void;
   setGameSpeed: (speed: number) => void;
   resetGame: () => void;
   tick: () => void;
   init: () => void;
+  setTactics: (updates: Partial<Pick<Tactics, 'formation' | 'mentality' | 'dribbleFrequency' | 'shootFrequency'>>) => void;
 }
+
+const defaultTactics: Tactics = {
+  formation: '4-4-2',
+  mentality: 'normal',
+  dribbleFrequency: 1.0,
+  shootFrequency: 1.0,
+  availableFormations: ['4-4-2', '4-3-3', '3-5-2', '5-3-2'],
+  availableMentalities: ['defensive', 'normal', 'offensive'],
+};
 
 export const useGameStore = create<GameStore>((set, get) => ({
   players: [],
@@ -59,6 +79,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   state: 'playing',
   lastTouch: null,
   restartTeam: 'home',
+  tactics: defaultTactics,
 
   togglePlay: () => set((state) => ({ isPlaying: !state.isPlaying })),
   setGameSpeed: (speed) => set({ gameSpeed: speed }),
@@ -75,6 +96,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
             state: data.state || 'playing',
             lastTouch: data.lastTouch || null,
             restartTeam: data.restartTeam || 'home',
+            tactics: data.tactics || defaultTactics,
             isPlaying: false 
           });
       } catch (e) {
@@ -93,7 +115,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
             time: data.time,
             state: data.state || 'playing',
             lastTouch: data.lastTouch || null,
-            restartTeam: data.restartTeam || 'home'
+            restartTeam: data.restartTeam || 'home',
+            tactics: data.tactics || get().tactics
           });
       } catch (e) {
           console.error("Failed to tick game:", e);
@@ -112,9 +135,28 @@ export const useGameStore = create<GameStore>((set, get) => ({
               time: data.time,
               state: data.state || 'playing',
               lastTouch: data.lastTouch || null,
-              restartTeam: data.restartTeam || 'home'
+              restartTeam: data.restartTeam || 'home',
+              tactics: data.tactics || defaultTactics
             });
         }
       } catch (e) { console.error("Failed to init game:", e) }
+  },
+
+  setTactics: async (updates) => {
+      try {
+        const res = await fetch('/api/tactics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates)
+        });
+        if (res.ok) {
+          const data = await res.json();
+          set((state) => ({
+            tactics: { ...state.tactics, ...data }
+          }));
+        }
+      } catch (e) {
+        console.error("Failed to set tactics:", e);
+      }
   }
 }));
