@@ -10,18 +10,22 @@ export default function TacticsPanel() {
   const setTactics = useGameStore((state) => state.setTactics);
 
   const handleFormationChange = (formation: string) => {
+    console.log('Formation clicked:', formation);
     setTactics({ formation });
   };
 
   const handleMentalityChange = (mentality: string) => {
+    console.log('Mentality clicked:', mentality);
     setTactics({ mentality });
   };
 
   const handleDribbleChange = (value: number[]) => {
+    console.log('Dribble slider changed:', value[0]);
     setTactics({ dribbleFrequency: value[0] });
   };
 
   const handleShootChange = (value: number[]) => {
+    console.log('Shoot slider changed:', value[0]);
     setTactics({ shootFrequency: value[0] });
   };
 
@@ -43,7 +47,7 @@ export default function TacticsPanel() {
   };
 
   return (
-    <Card className="h-full bg-card/50 border-white/5 backdrop-blur-sm" data-testid="tactics-panel">
+    <Card className="h-full bg-card/50 border-white/5 backdrop-blur-sm relative z-10" data-testid="tactics-panel">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-primary">
           <Gauge className="w-5 h-5" /> Tactical Command
