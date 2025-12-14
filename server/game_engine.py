@@ -517,7 +517,7 @@ class Player:
         return distance_factor * block_factor + role_bonus
 
     def _evaluate_pass(self, ctx):
-        """Evaluate passing options including space passes. Returns (best_teammate, target_pos, score)."""
+        """Evaluate passing options with vision checks and lead passes. Returns (best_teammate, target_pos, score)."""
         if len(ctx.teammates) == 0:
             return None, None, 0.0
         
@@ -541,13 +541,27 @@ class Player:
                 if 2.0 < target[0] < 98.0 and 2.0 < target[1] < 98.0:
                     candidate_positions.append(target)
         
-        # Also add direct teammate positions
+        # Also add direct teammate positions AND lead pass positions for moving teammates
         for teammate in ctx.teammates:
             if teammate.role != 'GK' or ctx.dist_to_goal >= 50:
                 candidate_positions.append(teammate.pos.copy())
+                # Add lead pass position if teammate is moving
+                if np.linalg.norm(teammate.vel) > 0.1:
+                    lead_target = teammate.pos + teammate.vel * 5.0  # Lead by 5 time steps
+                    if 2.0 < lead_target[0] < 98.0 and 2.0 < lead_target[1] < 98.0:
+                        candidate_positions.append(lead_target)
         
         # Evaluate each candidate position
         for target_pos in candidate_positions:
+            # VISION CHECK - prefer targets we can see
+            in_vision, vision_dist, vision_angle = is_in_vision_cone(
+                self.pos, ctx.facing, target_pos)
+            
+            # Blind spot penalty - behind player gets reduced score
+            vision_penalty = 0.0
+            if not in_vision and vision_angle > 90:
+                vision_penalty = 0.3  # Significant penalty for passes behind us
+            
             # Find which teammate can best reach this position
             best_reach_teammate = None
             best_reach_time = float('inf')
@@ -574,14 +588,18 @@ class Player:
             ball_time = pass_dist / BALL_PASS_SPEED
             
             # Check if teammate can reach target before/when ball arrives
-            # Allow small margin - teammate arrives within 0.5s of ball
             if best_reach_time > ball_time + 1.5:
                 continue  # Teammate can't reach in time
+            
+            # Check passing lane quality
+            lane_quality = calculate_passing_lane_quality(
+                self.pos, target_pos, ctx.opponent_positions)
+            if lane_quality < 0.3:
+                continue  # Lane is too blocked
             
             # Evaluate interception risk - check all opponents
             min_intercept_margin = float('inf')
             for opp_pos in ctx.opponent_positions:
-                # Time for opponent to reach any point on the pass path
                 closest_on_path = project_point_to_segment(opp_pos, self.pos, target_pos)
                 dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
                 dist_along_path = np.linalg.norm(closest_on_path - self.pos)
@@ -590,44 +608,46 @@ class Player:
                 time_opp_at_point = dist_to_path / PLAYER_SPRINT_SPEED
                 
                 margin = time_ball_at_point - time_opp_at_point
-                min_intercept_margin = min(min_intercept_margin, margin)
+                min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            # Skip if easily interceptable
-            if min_intercept_margin < 0.3:
+            # Skip if easily interceptable - STRICTER threshold
+            if min_intercept_margin < 0.5:
                 continue
             
-            # Score based on:
-            # 1. Interception safety (higher margin = safer)
+            # Score components
             safety_score = min(1.0, min_intercept_margin / 2.0)
             
-            # 2. Space around target (less opponents nearby = better)
+            # Space around target with larger radius
             space_score = 1.0
             for opp_pos in ctx.opponent_positions:
                 opp_dist = np.linalg.norm(opp_pos - target_pos)
-                if opp_dist < 10.0:
-                    space_score -= (1.0 - opp_dist / 10.0) * 0.2
+                if opp_dist < 12.0:  # Larger check radius
+                    space_score -= (1.0 - opp_dist / 12.0) * 0.25
             space_score = max(0.0, space_score)
             
-            # 3. Progress toward goal
+            # Progress toward goal
             my_goal_dist = ctx.dist_to_goal
             target_goal_dist = distance_to_goal(target_pos, ctx.team)
             progress_score = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
             progress_score = float(np.clip(progress_score, 0, 1))
             
-            # 4. Teammate accessibility bonus
+            # Teammate accessibility bonus
             access_score = 1.0 - min(best_reach_time / 3.0, 1.0)
             
-            # Combined score
+            # Combined score with lane quality and vision
+            combined_safety = safety_score * lane_quality
+            
             score = (
-                0.40 * safety_score +
-                0.25 * space_score +
+                0.45 * combined_safety +
+                0.20 * space_score +
                 0.20 * progress_score +
-                0.15 * access_score
+                0.15 * access_score -
+                vision_penalty
             )
             
-            # Bonus for very safe options
-            if safety_score > 0.7 and space_score > 0.6:
-                score += 0.1
+            # Bonus for very safe options in clear lanes
+            if combined_safety > 0.6 and space_score > 0.6:
+                score += SPACE_PASS_BONUS
             
             if score > best_score:
                 best_score = score
@@ -649,11 +669,14 @@ class Player:
         target_goal_dist = distance_to_goal(target_pos, ctx.team)
         is_back_pass = target_goal_dist > my_goal_dist + 3.0
         
-        # Back passes get a small progress penalty but are still evaluated fully
-        back_pass_penalty = 0.05 if is_back_pass else 0.0
+        # STRONGER back pass penalty
+        back_pass_penalty = 0.25 if is_back_pass else 0.0
+        
+        # Check passing lane quality
+        lane_quality = calculate_passing_lane_quality(
+            self.pos, target_pos, ctx.opponent_positions)
         
         # GEOMETRIC INTERCEPTION CHECK
-        # Calculate ball travel time
         ball_travel_time = pass_dist / BALL_PASS_SPEED
         
         # Check each opponent's ability to intercept
@@ -661,79 +684,77 @@ class Player:
         can_be_intercepted = False
         
         for opp_pos in ctx.opponent_positions:
-            # Find closest point on pass path to opponent
             closest_on_path = project_point_to_segment(opp_pos, self.pos, target_pos)
             dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
             
-            # Calculate how far along the path this intercept point is
             dist_along_path = np.linalg.norm(closest_on_path - self.pos)
             time_ball_reaches_point = dist_along_path / BALL_PASS_SPEED
             
-            # Time for opponent to reach intercept point
             time_opp_reaches_point = dist_to_path / PLAYER_SPRINT_SPEED
             
-            # If opponent can reach the ball path before ball arrives - DANGEROUS
+            # STRICTER margin check: 1.0 instead of 0.5
             time_margin = time_ball_reaches_point - time_opp_reaches_point
             
-            if time_margin < 0.5:  # Opponent arrives within 0.5 time units of ball
+            if time_margin < 1.0:  # Opponent arrives within 1.0 time units of ball
                 can_be_intercepted = True
-                # Risk increases as margin decreases - CLAMP to [0,1]
                 risk_factor = min(1.0, max(0.0, 1.0 - time_margin))
-                interception_risk = max(interception_risk, risk_factor)
+                interception_risk = max(interception_risk, float(risk_factor))
         
-        # CHECK RECEIVER SAFETY - count opponents near the receiving teammate
-        # Extended radius to 8 units, count density not just closest
+        # CHECK RECEIVER SAFETY - LARGER radius (10 units instead of 8)
         receiver_safety = 1.0
         nearby_opponent_count = 0
         for opp_pos in ctx.opponent_positions:
             dist_opp_to_receiver = np.linalg.norm(opp_pos - target_pos)
-            if dist_opp_to_receiver < 8.0:
+            if dist_opp_to_receiver < 10.0:  # Larger radius
                 nearby_opponent_count += 1
-                # Closer opponents reduce safety more
-                proximity_penalty = 1.0 - (dist_opp_to_receiver / 8.0)
-                receiver_safety -= proximity_penalty * 0.3
+                proximity_penalty = 1.0 - (dist_opp_to_receiver / 10.0)
+                receiver_safety -= proximity_penalty * 0.35
         
-        # Extra penalty for crowded areas (multiple opponents)
+        # Extra penalty for crowded areas
         if nearby_opponent_count >= 2:
-            receiver_safety -= 0.2 * (nearby_opponent_count - 1)
+            receiver_safety -= 0.25 * (nearby_opponent_count - 1)
         
-        receiver_safety = max(0.0, receiver_safety)
+        receiver_safety = max(0.0, float(receiver_safety))
         
-        # Calculate base safety score - MULTIPLY so both must be safe
+        # Calculate combined safety - all three must be good
         path_safety = max(0.0, 1.0 - interception_risk) if can_be_intercepted else 1.0
-        safety_score = path_safety * receiver_safety  # Both must be good
+        combined_safety = path_safety * receiver_safety * lane_quality
+        
+        # REJECT if combined safety is too low
+        if combined_safety < 0.4:
+            return 0.0
         
         # ROLE-BASED RISK TOLERANCE
         if self.role == 'DEF' and (can_be_intercepted or receiver_safety < 0.5):
-            return 0.0  # Defenders avoid risky passes
+            return 0.0
         if self.role == 'GK' and (can_be_intercepted or receiver_safety < 0.7):
-            return 0.0  # GK is most conservative
+            return 0.0
         
-        # Progress factor - mild bonus for forward passes
+        # Progress factor
         progress_factor = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
         progress_factor = float(np.clip(progress_factor, 0, 1))
         
-        # Distance factor - prefer medium-range passes but don't penalize short ones much
+        # Distance factor
         if pass_dist < 5.0:
-            dist_factor = 0.8  # Short passes are fine
+            dist_factor = 0.8
         elif pass_dist < 25.0:
-            dist_factor = 1.0  # Optimal range
+            dist_factor = 1.0
         else:
             dist_factor = max(0.3, 1.0 - (pass_dist - 25.0) / 25.0)
         
-        # BALANCED SCORING: Safety matters but ensure passes can happen
+        # SAFETY-FIRST SCORING
         score = (
-            0.60 * safety_score +            # Safety is important
-            0.25 * progress_factor +         # Forward progress bonus
-            0.15 * dist_factor -             # Distance factor
-            back_pass_penalty                # Small penalty for going backward
+            PASS_SAFETY_WEIGHT * combined_safety +
+            PASS_GOAL_PROGRESS_WEIGHT * progress_factor +
+            0.10 * dist_factor -
+            back_pass_penalty
         )
         
-        # Ensure minimum score for any valid pass option
-        if safety_score > 0.3:
-            score = max(score, 0.15)  # Baseline for reasonably safe passes
+        # Minimum score only for very safe passes
+        if combined_safety > 0.5:
+            score = max(score, 0.20)
         
-        return max(0.0, score)
+        return max(0.0, float(score))
 
     def _evaluate_dribble(self, ctx):
         """Evaluate dribbling options. Returns (best_direction, score)."""
