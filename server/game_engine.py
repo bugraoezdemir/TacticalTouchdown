@@ -256,6 +256,25 @@ class Player:
     def _make_ball_decision(self, ctx, game):
         """Decision making when player has the ball."""
         
+        # GK holds ball briefly then clears - use a timer based decision
+        if self.role == 'GK':
+            # GK waits a bit then clears (decision is made each tick, so just clear)
+            # The holding happens in iterate() - GK keeps ball securely
+            # After ~15 ticks of holding, GK will clear (controlled by gk_hold_timer)
+            if game.gk_hold_timer >= 15:
+                game.gk_hold_timer = 0
+                self._execute_clearance(ctx, game)
+            return
+        
+        # Check if we need a defensive clearance (ball near own goal) - not for GK
+        own_goal_x = 0.0 if self.team == 'home' else 100.0
+        dist_to_own_goal = abs(self.pos[0] - own_goal_x)
+        
+        # If very close to own goal, clear the ball upfield
+        if dist_to_own_goal < 20.0 and self.role != 'FWD':
+            self._execute_clearance(ctx, game)
+            return
+        
         shoot_score = self._evaluate_shoot(ctx)
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
@@ -438,7 +457,20 @@ class Player:
             lead_factor = 0.3
             target_pos = target_player.pos + target_player.vel * lead_factor * 10
         
-        pass_dir = normalize(target_pos - self.pos)
+        # Prevent zero-length passes that cause freeze - ensure minimum distance
+        pass_vec = target_pos - self.pos
+        pass_dist = np.linalg.norm(pass_vec)
+        if pass_dist < 3.0:
+            # Fall back to teammate position if target is too close
+            target_pos = target_player.pos.copy()
+            pass_vec = target_pos - self.pos
+            pass_dist = np.linalg.norm(pass_vec)
+            if pass_dist < 1.0:
+                # Emergency: just kick toward attacking goal
+                target_pos = ctx.goal_center
+                pass_vec = target_pos - self.pos
+        
+        pass_dir = normalize(pass_vec)
         game.ball.vel = pass_dir * BALL_PASS_SPEED
         
         # Track last touch
@@ -447,6 +479,22 @@ class Player:
     def _execute_dribble(self, ctx, game, direction):
         """Execute dribbling in the given direction."""
         self.vel = direction * BALL_DRIBBLE_SPEED
+    
+    def _execute_clearance(self, ctx, game):
+        """Clear the ball upfield away from danger."""
+        self.has_ball = False
+        game.ball.owner_id = None
+        
+        # Kick toward attacking goal with some randomness
+        target_x = ctx.goal_x
+        target_y = 50.0 + (random.random() - 0.5) * 40  # Random y between 30-70
+        target = np.array([target_x, target_y])
+        
+        clear_dir = normalize(target - self.pos)
+        game.ball.vel = clear_dir * BALL_SHOOT_SPEED  # Use shoot speed for power
+        
+        # Track last touch
+        game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
     def _make_off_ball_decision(self, ctx, game):
         """Decision making when player doesn't have the ball."""
@@ -605,6 +653,7 @@ class Game:
         self.dribble_tick = 0  # Counter for dribble touch system
         self.steal_cooldown = 0  # Prevent immediate re-steals
         self.last_dribbler_id = None  # Track who just released ball to prevent instant re-pickup
+        self.gk_hold_timer = 0  # Timer for GK holding the ball before clearing
         self.init_players()
 
     def init_players(self):
@@ -659,46 +708,52 @@ class Game:
         else:
             owner = next((p for p in self.players if p.id == self.ball.owner_id), None)
             if owner:
-                # Check if opponent is pressuring the ball carrier (tackle attempt)
-                # Cooldown prevents ping-pong steals
-                if self.steal_cooldown > 0:
-                    self.steal_cooldown -= 1
+                # GK holds the ball securely - no tackle steal allowed
+                if owner.role == 'GK':
+                    # GK keeps ball until they decide to clear it
+                    self.ball.pos = owner.pos.copy()
+                    self.gk_hold_timer += 1  # Increment hold timer
                 else:
-                    for p in self.players:
-                        if p.team != owner.team:
-                            dist = np.linalg.norm(p.pos - owner.pos)
-                            if dist <= TACKLE_DISTANCE:
-                                # 30% chance to steal when pressing
-                                if random.random() < 0.30:
-                                    owner.has_ball = False
-                                    self.ball.owner_id = p.id
-                                    p.has_ball = True
-                                    self.ball.pos = p.pos.copy()
-                                    self.last_touch = LastTouch(team=p.team, player_id=p.id)
-                                    self.dribble_tick = 0
-                                    self.steal_cooldown = 10  # 10 ticks cooldown before next steal possible
-                                    break
-                
-                # If still has ball, apply dribble touch system
-                if self.ball.owner_id == owner.id:
-                    self.dribble_tick += 1
-                    if self.dribble_tick >= DRIBBLE_TOUCH_INTERVAL:
-                        self.dribble_tick = 0
-                        # Push ball ahead in dribble direction
-                        if np.linalg.norm(owner.vel) > 0.1:
-                            dribble_dir = normalize(owner.vel)
-                            self.ball.pos = owner.pos + dribble_dir * DRIBBLE_TOUCH_DISTANCE
-                            # Ball becomes loose - clear ownership
-                            self.last_dribbler_id = owner.id  # Remember who released it
-                            owner.has_ball = False
-                            self.ball.owner_id = None
-                            self.ball.vel = dribble_dir * 0.5  # Give ball more momentum
-                        else:
-                            # Standing still - ball stays with player
-                            self.ball.pos = owner.pos.copy()
+                    # Check if opponent is pressuring the ball carrier (tackle attempt)
+                    # Cooldown prevents ping-pong steals
+                    if self.steal_cooldown > 0:
+                        self.steal_cooldown -= 1
                     else:
-                        # Between touches - ball follows player closely
-                        self.ball.pos = owner.pos.copy()
+                        for p in self.players:
+                            if p.team != owner.team:
+                                dist = np.linalg.norm(p.pos - owner.pos)
+                                if dist <= TACKLE_DISTANCE:
+                                    # 30% chance to steal when pressing
+                                    if random.random() < 0.30:
+                                        owner.has_ball = False
+                                        self.ball.owner_id = p.id
+                                        p.has_ball = True
+                                        self.ball.pos = p.pos.copy()
+                                        self.last_touch = LastTouch(team=p.team, player_id=p.id)
+                                        self.dribble_tick = 0
+                                        self.steal_cooldown = 10  # 10 ticks cooldown before next steal possible
+                                        break
+                    
+                    # If still has ball, apply dribble touch system (not for GK)
+                    if self.ball.owner_id == owner.id:
+                        self.dribble_tick += 1
+                        if self.dribble_tick >= DRIBBLE_TOUCH_INTERVAL:
+                            self.dribble_tick = 0
+                            # Push ball ahead in dribble direction
+                            if np.linalg.norm(owner.vel) > 0.1:
+                                dribble_dir = normalize(owner.vel)
+                                self.ball.pos = owner.pos + dribble_dir * DRIBBLE_TOUCH_DISTANCE
+                                # Ball becomes loose - clear ownership
+                                self.last_dribbler_id = owner.id  # Remember who released it
+                                owner.has_ball = False
+                                self.ball.owner_id = None
+                                self.ball.vel = dribble_dir * 0.5  # Give ball more momentum
+                            else:
+                                # Standing still - ball stays with player
+                                self.ball.pos = owner.pos.copy()
+                        else:
+                            # Between touches - ball follows player closely
+                            self.ball.pos = owner.pos.copy()
         
         # Detect ball events
         event = self._detect_ball_event()
