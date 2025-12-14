@@ -382,17 +382,16 @@ class Player:
     def _make_ball_decision(self, ctx, game):
         """Decision making when player has the ball."""
         
-        # GK always clears the ball immediately when they have it
+        # GK should pass to defenders, only clear under heavy pressure
         if self.role == 'GK':
-            self._execute_clearance(ctx, game)
+            pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
+            if pass_score >= 0.2 and pass_option is not None:
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            else:
+                self._execute_clearance(ctx, game)
             return
         
-        # Track distance to own goal for later decision making
-        own_goal_x = 0.0 if self.team == 'home' else 100.0
-        dist_to_own_goal = abs(self.pos[0] - own_goal_x)
-        near_own_goal = dist_to_own_goal < 20.0 and self.role != 'FWD'
-        
-        # ALWAYS evaluate options first - even near own goal
+        # Evaluate all options
         shoot_score = self._evaluate_shoot(ctx)
         pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
         dribble_dir, dribble_score = self._evaluate_dribble(ctx)
@@ -402,55 +401,42 @@ class Player:
             shoot_score *= game.home_shoot_frequency
             dribble_score *= game.home_dribble_frequency
         
-        # DEFENDER/NEAR OWN GOAL SAFETY CHECK: Evaluate passes before clearing
-        if self.role == 'DEF' or near_own_goal:
-            min_opp_dist = float('inf')
-            for opp_pos in ctx.opponent_positions:
-                d = np.linalg.norm(opp_pos - self.pos)
-                min_opp_dist = min(min_opp_dist, float(d))
-            
-            # Has a safe pass option - ALWAYS prefer it over clearing
-            if pass_score >= 0.35 and pass_option is not None:
-                self._execute_pass(ctx, game, pass_option, pass_target)
-                return
-            # Under heavy pressure with no safe pass - clear
-            if min_opp_dist < 10.0 and pass_score < 0.35:
-                self._execute_clearance(ctx, game)
-                return
-            # Near own goal with no safe pass at all - clear
-            if near_own_goal and pass_score < 0.3:
-                self._execute_clearance(ctx, game)
-                return
+        # DRIBBLING ONLY ALLOWED IN FINAL THIRD (near opponent goal)
+        in_final_third = ctx.dist_to_goal < 33.0  # Last 1/3 of pitch
+        can_dribble = in_final_third
         
-        # ATTACKERS IN FINAL THIRD (last 1/3 of pitch) prefer dribble/shoot
-        in_final_third = ctx.dist_to_goal < 33.0  # 1/3 of 100-unit pitch
-        is_attacker = self.role in ['FWD', 'MID']
+        # Check pressure level for clearance decision
+        min_opp_dist = float('inf')
+        for opp_pos in ctx.opponent_positions:
+            d = np.linalg.norm(opp_pos - self.pos)
+            min_opp_dist = min(min_opp_dist, float(d))
         
-        if in_final_third and is_attacker:
-            # In attacking zone: Shoot if clear, otherwise pass to build up, dribble as last resort
-            if shoot_score > 0.3:  # Only shoot with reasonable chance
+        # IN FINAL THIRD: Can shoot, pass, or dribble
+        if in_final_third:
+            if shoot_score > 0.25:
                 self._execute_shoot(ctx, game)
-            elif pass_score > 0.5 and pass_option is not None:  # Safe passes encouraged
-                self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score > 0.3:  # Dribble if space available
-                self._execute_dribble(ctx, game, dribble_dir)
-            elif pass_score > 0.3 and pass_option is not None:  # Lower threshold pass
-                self._execute_pass(ctx, game, pass_option, pass_target)
-            else:
-                # Default to dribble in attacking zone
-                self._execute_dribble(ctx, game, dribble_dir)
-        else:
-            # Normal decision making outside shooting range
-            if shoot_score > SHOOT_SCORE_THRESHOLD and shoot_score >= pass_score * 0.8:
-                self._execute_shoot(ctx, game)
-            elif pass_score > PASS_SCORE_THRESHOLD and pass_score > dribble_score and pass_option is not None:
+            elif pass_score >= 0.15 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             elif dribble_score > 0.2:
                 self._execute_dribble(ctx, game, dribble_dir)
-            elif shoot_score > 0.1:
-                self._execute_shoot(ctx, game)
+            elif pass_option is not None:
+                self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_dribble(ctx, game, dribble_dir)
+        else:
+            # OUTSIDE FINAL THIRD: Short passing only, no dribbling
+            # Only clear under EXTREME pressure with no pass option
+            if pass_score >= 0.1 and pass_option is not None:
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            elif min_opp_dist < 5.0 and pass_score < 0.1:
+                # Under extreme pressure with no pass - clear
+                self._execute_clearance(ctx, game)
+            elif pass_option is not None:
+                # Any pass is better than clearance
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            else:
+                # No pass option at all - must clear
+                self._execute_clearance(ctx, game)
 
     def _evaluate_shoot(self, ctx):
         """Evaluate shooting option. Returns score 0-1."""
@@ -599,13 +585,17 @@ class Player:
         else:
             dist_factor = max(0.3, 1.0 - (pass_dist - 25.0) / 25.0)
         
-        # SAFETY-FIRST SCORING: Safety is 85%, other factors are tie-breakers
+        # BALANCED SCORING: Safety matters but ensure passes can happen
         score = (
-            0.85 * safety_score +            # Safety dominates
-            0.10 * progress_factor +         # Minor forward progress bonus
-            0.05 * dist_factor -             # Minor distance factor
+            0.60 * safety_score +            # Safety is important
+            0.25 * progress_factor +         # Forward progress bonus
+            0.15 * dist_factor -             # Distance factor
             back_pass_penalty                # Small penalty for going backward
         )
+        
+        # Ensure minimum score for any valid pass option
+        if safety_score > 0.3:
+            score = max(score, 0.15)  # Baseline for reasonably safe passes
         
         return max(0.0, score)
 
