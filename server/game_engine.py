@@ -600,6 +600,7 @@ class Player:
                 continue  # Lane is too blocked
             
             # Evaluate interception risk - check all opponents
+            # Margin = how much sooner ball arrives than opponent (positive = safe)
             min_intercept_margin = float('inf')
             for opp_pos in ctx.opponent_positions:
                 closest_on_path = project_point_to_segment(opp_pos, self.pos, target_pos)
@@ -609,15 +610,16 @@ class Player:
                 time_ball_at_point = dist_along_path / BALL_PASS_SPEED
                 time_opp_at_point = dist_to_path / PLAYER_SPRINT_SPEED
                 
-                margin = time_ball_at_point - time_opp_at_point
+                # FIX: margin = opponent_time - ball_time (positive means ball arrives first = SAFE)
+                margin = time_opp_at_point - time_ball_at_point
                 min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            # Skip if easily interceptable - STRICTER threshold
-            if min_intercept_margin < 0.5:
+            # Skip only if opponent can intercept (margin < 0 means opponent arrives first)
+            if min_intercept_margin < -0.5:
                 continue
             
-            # Score components
-            safety_score = min(1.0, min_intercept_margin / 2.0)
+            # Score components - higher margin = safer (margin > 0 means ball arrives first)
+            safety_score = min(1.0, max(0.0, (min_intercept_margin + 1.0) / 3.0))
             
             # Space around target with larger radius
             space_score = 1.0
@@ -695,12 +697,14 @@ class Player:
             
             time_opp_reaches_point = dist_to_path / PLAYER_SPRINT_SPEED
             
-            # STRICTER margin check: 1.0 instead of 0.5
-            time_margin = time_ball_reaches_point - time_opp_reaches_point
+            # FIX: margin = opponent_time - ball_time (positive = ball arrives first = SAFE)
+            time_margin = time_opp_reaches_point - time_ball_reaches_point
             
-            if time_margin < 1.0:  # Opponent arrives within 1.0 time units of ball
+            # Negative margin means opponent arrives before ball = dangerous
+            if time_margin < 0.5:  # Opponent arrives before or close to ball
                 can_be_intercepted = True
-                risk_factor = min(1.0, max(0.0, 1.0 - time_margin))
+                # Risk increases as margin becomes more negative
+                risk_factor = min(1.0, max(0.0, 0.5 - time_margin))
                 interception_risk = max(interception_risk, float(risk_factor))
         
         # CHECK RECEIVER SAFETY - LARGER radius (10 units instead of 8)
@@ -723,8 +727,8 @@ class Player:
         path_safety = max(0.0, 1.0 - interception_risk) if can_be_intercepted else 1.0
         combined_safety = path_safety * receiver_safety * lane_quality
         
-        # REJECT if combined safety is too low
-        if combined_safety < 0.4:
+        # REJECT only if very unsafe
+        if combined_safety < 0.2:
             return 0.0
         
         # ROLE-BASED RISK TOLERANCE
