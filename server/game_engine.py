@@ -1229,8 +1229,13 @@ class Player:
             team_has_possession = (game.last_touch.team == self.team)
         
         if team_has_possession:
-            # MIDFIELDERS: Make forward runs when team has possession
-            if self.role == 'MID' and (ball_owner is None or ball_owner.id != self.id):
+            # Determine if player should make forward runs
+            # MIDFIELDERS and WINGERS (FWD on left/right) make forward runs
+            is_midfielder = self.role == 'MID'
+            is_winger = self.role == 'FWD' and self.lateral_role in ['left', 'right']
+            should_make_runs = (is_midfielder or is_winger) and (ball_owner is None or ball_owner.id != self.id)
+            
+            if should_make_runs:
                 # Check if ball is past own defensive third (more permissive)
                 if self.team == 'home':
                     can_run_forward = game.ball.pos[0] > 25.0  # Past own third
