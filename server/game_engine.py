@@ -1283,12 +1283,14 @@ class Player:
             home_blend = HOME_POSITION_WEIGHT * self.zone_weight * 0.5  # Even lower blend
             blended_target = (1 - home_blend) * clamped_target + home_blend * shifted_home
         
-        # Move towards blended target
+        # Move towards blended target - sprint during forward runs
         to_target = blended_target - self.pos
         dist = np.linalg.norm(to_target)
         
         if dist > 2.0:
-            self.vel = normalize(to_target) * PLAYER_SPEED
+            # Sprint during forward runs, normal speed otherwise
+            move_speed = PLAYER_SPRINT_SPEED if skip_zone_blend else PLAYER_SPEED
+            self.vel = normalize(to_target) * move_speed
         else:
             self.vel = np.zeros(2)
     
@@ -1306,21 +1308,29 @@ class Player:
         ])
 
     def _make_forward_run(self, ctx, ball_owner, game):
-        """Midfielder makes forward run into attacking space."""
-        goal_dir = normalize(ctx.goal_center - self.pos)
+        """Midfielder makes aggressive forward run into attacking space ahead of the ball."""
+        ball_pos = game.ball.pos
+        goal_center = ctx.goal_center
         
-        # Run ahead of ball carrier toward goal
-        run_distance = 15.0 + random.uniform(0, 10)
+        # Direction from ball toward goal
+        ball_to_goal = goal_center - ball_pos
+        goal_dir = normalize(ball_to_goal)
         
-        # Add some lateral offset to avoid crowding
+        # Run 15-22 units ahead of the ball toward goal
+        run_distance = 18.0 + random.uniform(0, 6)
+        
+        # Offset to half-space (channel between center and wing)
         perp = np.array([-goal_dir[1], goal_dir[0]])
-        lateral_offset = (random.random() - 0.5) * 15.0
+        # Choose side based on player's current position relative to ball
+        side = 1 if self.pos[1] > ball_pos[1] else -1
+        lateral_offset = side * (12.0 + random.uniform(0, 8))
         
-        run_target = self.pos + goal_dir * run_distance + perp * lateral_offset
+        # Target is ahead of ball, offset to half-space
+        run_target = ball_pos + goal_dir * run_distance + perp * lateral_offset
         
-        # Keep in bounds
-        run_target[0] = float(np.clip(run_target[0], 10.0, 90.0))
-        run_target[1] = float(np.clip(run_target[1], 10.0, 90.0))
+        # Keep in bounds with margin
+        run_target[0] = float(np.clip(run_target[0], 8.0, 92.0))
+        run_target[1] = float(np.clip(run_target[1], 8.0, 92.0))
         
         return run_target
 
@@ -1816,12 +1826,20 @@ class Game:
             eligible_players = [p for p in closest_players if p.touch_cooldown_until <= self.time]
             
             if eligible_players:
+                # Check if this is a tackle (defender winning ball from opponent)
+                previous_owner_team = self.last_touch.team if self.last_touch else None
+                
                 # Random tiebreaker if multiple players equally close
                 controller = random.choice(eligible_players)
                 controller.has_ball = True
                 controller.touch_cooldown_until = 0.0  # Reset cooldown on ball acquisition
                 self.ball.owner_id = controller.id
                 self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
+                
+                # TACKLE CLEARANCE: If defender wins ball from opponent, immediately clear it
+                is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
+                if is_tackle and controller.role == 'DEF':
+                    self._execute_tackle_clearance(controller)
         
         # Update Players - each player makes a decision
         for p in self.players:
@@ -1956,6 +1974,68 @@ class Game:
                     
                     self.last_touch = LastTouch(team=p.team, player_id=p.id)
                 break  # Only one GK can save
+
+    def _execute_tackle_clearance(self, defender):
+        """Defender immediately clears the ball after winning a tackle."""
+        defender.has_ball = False
+        self.ball.owner_id = None
+        
+        # Find teammates and opponent positions
+        teammates = [p for p in self.players if p.team == defender.team and p.id != defender.id]
+        opponents = [p for p in self.players if p.team != defender.team]
+        opponent_positions = [p.pos for p in opponents]
+        
+        # Try to find a safe teammate to pass to
+        best_target = None
+        best_safety = 0.0
+        
+        for teammate in teammates:
+            if teammate.role == 'GK':
+                continue
+            
+            dist = np.linalg.norm(teammate.pos - defender.pos)
+            if dist < 10.0 or dist > 35.0:
+                continue
+            
+            # Check lane quality
+            lane_quality = calculate_passing_lane_quality(defender.pos, teammate.pos, opponent_positions)
+            
+            # Prefer forward passes (away from own goal)
+            if defender.team == 'home':
+                forward_bonus = 0.2 if teammate.pos[0] > defender.pos[0] else 0.0
+            else:
+                forward_bonus = 0.2 if teammate.pos[0] < defender.pos[0] else 0.0
+            
+            safety = lane_quality + forward_bonus
+            
+            if safety > best_safety and lane_quality > 0.5:
+                best_safety = safety
+                best_target = teammate.pos
+        
+        # If safe teammate found, pass to them
+        if best_target is not None:
+            pass_dir = normalize(best_target - defender.pos)
+            self.ball.vel = pass_dir * BALL_PASS_SPEED
+        else:
+            # No safe teammate - clear to touchline
+            # Pick the nearest touchline (top or bottom)
+            if defender.pos[1] < 50:
+                target_y = 0.0  # Top touchline
+            else:
+                target_y = 100.0  # Bottom touchline
+            
+            # Aim slightly forward too
+            if defender.team == 'home':
+                target_x = defender.pos[0] + 20.0
+            else:
+                target_x = defender.pos[0] - 20.0
+            target_x = float(np.clip(target_x, 10.0, 90.0))
+            
+            clear_target = np.array([target_x, target_y])
+            clear_dir = normalize(clear_target - defender.pos)
+            self.ball.vel = clear_dir * BALL_SHOOT_SPEED * 0.7  # Strong clearance
+        
+        self.last_touch = LastTouch(team=defender.team, player_id=defender.id)
 
     def _transition_state(self, event):
         """Transition game state based on event."""
