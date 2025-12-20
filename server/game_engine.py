@@ -496,6 +496,17 @@ class Player:
         # Check for hot teammate (someone with better shooting chance)
         hot_teammate, hot_opportunity = self._find_hot_teammate(ctx)
         
+        # Evaluate runway (lead) passes for MID and FWD
+        runway_target, runway_score = None, 0.0
+        runway_teammate = None
+        if self.role in ['MID', 'FWD']:
+            for teammate in ctx.teammates:
+                target, score = self._evaluate_runway_pass(ctx, teammate)
+                if score > runway_score:
+                    runway_score = score
+                    runway_target = target
+                    runway_teammate = teammate
+        
         # DANGER ZONE: Shoot/dribble priority, but pass to hot teammate
         if dist < 20:
             if hot_teammate is not None and hot_opportunity > shoot_score + 0.15:
@@ -509,9 +520,12 @@ class Player:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_shoot(ctx, game)  # Force a shot when close
-        # ATTACK ZONE: Balanced - check for hot teammate before dribbling
+        # ATTACK ZONE: Balanced - check for runway pass and hot teammate
         elif dist < 40:
-            if hot_teammate is not None and hot_opportunity > 0.5:
+            if runway_score > 0.5 and runway_target is not None:
+                # Execute runway pass to create scoring opportunity
+                self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
+            elif hot_teammate is not None and hot_opportunity > 0.4:
                 # Pass to teammate with good chance
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
             elif shoot_score > 0.2:
@@ -526,9 +540,12 @@ class Player:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_dribble(ctx, game, dribble_dir)
-        # MIDFIELD/BUILD-UP: Pass-focused
+        # MIDFIELD/BUILD-UP: Pass-focused with runway option
         else:
-            if pass_score >= 0.1 and pass_option is not None:
+            if runway_score > 0.4 and runway_target is not None and self.role in ['MID', 'FWD']:
+                # Execute runway pass to start attack
+                self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
+            elif pass_score >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             elif min_opp_dist < 5.0 and pass_score < 0.1:
                 self._execute_clearance(ctx, game)
@@ -1302,7 +1319,7 @@ class Player:
 
     def _find_hot_teammate(self, ctx):
         """Find teammate with best scoring opportunity (in better position than self)."""
-        my_shoot_score = self._evaluate_shoot(ctx)
+        my_shoot_score = min(self._evaluate_shoot(ctx), 0.5)  # Cap own score for fairer comparison
         
         best_teammate = None
         best_opportunity = 0.0
@@ -1314,7 +1331,8 @@ class Player:
             # Calculate teammate's shooting opportunity
             teammate_dist = distance_to_goal(teammate.pos, ctx.team)
             
-            if teammate_dist > SHOOT_DISTANCE_THRESHOLD:
+            # Extend range to 45 units (was 35)
+            if teammate_dist > 45:
                 continue
             
             # Check blocking opponents for teammate's shot
@@ -1324,32 +1342,108 @@ class Player:
                 if distance_point_to_segment(opp_pos, teammate.pos, goal_center) < 4.0:
                     blocking += 1
             
-            # Calculate opportunity score
-            if teammate_dist < 15:
+            # Calculate opportunity score - more generous
+            if teammate_dist < 18:
                 dist_factor = 1.0
-            elif teammate_dist < 25:
-                dist_factor = 0.8
+            elif teammate_dist < 30:
+                dist_factor = 0.7
             else:
                 dist_factor = 0.4
             
             if blocking == 0:
-                block_factor = 1.2
+                block_factor = 1.0
             elif blocking == 1:
-                block_factor = 0.6
+                block_factor = 0.5
             else:
                 block_factor = 0.2
             
             opportunity = dist_factor * block_factor
             
-            # Check if pass to this teammate is safe
+            # Check if pass to this teammate is safe - lower threshold
             lane_quality = calculate_passing_lane_quality(self.pos, teammate.pos, ctx.opponent_positions)
             
-            # Only consider if better than our own shot AND pass is safe
-            if opportunity > my_shoot_score + 0.1 and opportunity > best_opportunity and lane_quality > 0.4:
+            # Only consider if better than our own shot AND pass is reasonably safe
+            if opportunity > my_shoot_score and opportunity > best_opportunity and lane_quality > 0.3:
                 best_opportunity = opportunity
                 best_teammate = teammate
         
         return best_teammate, best_opportunity
+
+    def _evaluate_runway_pass(self, ctx, teammate):
+        """Evaluate a lead pass to where teammate is running."""
+        if teammate.role == 'GK':
+            return None, 0.0
+        
+        # Get teammate's velocity/direction
+        teammate_vel = teammate.vel
+        teammate_speed = np.linalg.norm(teammate_vel)
+        
+        # Only consider if teammate is moving
+        if teammate_speed < 0.3:
+            return None, 0.0
+        
+        teammate_dir = normalize(teammate_vel)
+        
+        # Calculate lead pass target - where teammate will be
+        pass_dist = np.linalg.norm(teammate.pos - self.pos)
+        ball_travel_time = pass_dist / BALL_PASS_SPEED
+        
+        # Lead the pass by 1-2 seconds of teammate movement
+        lead_time = min(ball_travel_time * 1.5, 2.0)
+        lead_target = teammate.pos + teammate_dir * teammate_speed * lead_time * 30  # Scale for game units
+        
+        # Clamp to field bounds
+        lead_target[0] = float(np.clip(lead_target[0], 5.0, 95.0))
+        lead_target[1] = float(np.clip(lead_target[1], 5.0, 95.0))
+        
+        # Only valuable if pass goes forward toward goal
+        my_goal_dist = ctx.dist_to_goal
+        target_goal_dist = distance_to_goal(lead_target, ctx.team)
+        
+        if target_goal_dist >= my_goal_dist:
+            return None, 0.0  # Not a forward pass
+        
+        # Check lane safety to lead target
+        lane_quality = calculate_passing_lane_quality(self.pos, lead_target, ctx.opponent_positions)
+        
+        if lane_quality < 0.4:
+            return None, 0.0  # Too risky
+        
+        # Check if teammate can reach the target before opponents
+        teammate_reach_time = np.linalg.norm(lead_target - teammate.pos) / PLAYER_SPRINT_SPEED
+        
+        min_opp_time = float('inf')
+        for opp_pos in ctx.opponent_positions:
+            opp_time = np.linalg.norm(lead_target - opp_pos) / PLAYER_SPRINT_SPEED
+            min_opp_time = min(min_opp_time, opp_time)
+        
+        if teammate_reach_time > min_opp_time - 0.5:
+            return None, 0.0  # Opponent would get there first
+        
+        # Score based on goal progress and space created
+        progress_score = (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
+        space_score = min(min_opp_time / 3.0, 1.0)
+        
+        score = 0.4 * lane_quality + 0.4 * progress_score + 0.2 * space_score
+        
+        # Bonus if lead target is in shooting range
+        if target_goal_dist < 25:
+            score += 0.15
+        
+        return lead_target, score
+
+    def _execute_runway_pass(self, ctx, game, teammate, lead_target):
+        """Execute a lead pass to where teammate is running."""
+        self.has_ball = False
+        game.ball.owner_id = None
+        
+        pass_vec = lead_target - self.pos
+        pass_dir = normalize(pass_vec)
+        
+        # Slightly faster than normal pass for through balls
+        game.ball.vel = pass_dir * BALL_PASS_SPEED * 1.1
+        
+        game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
     def _find_support_spot(self, ctx, ball_owner, game):
         """Find best support position - safe for receiving passes, within zone."""
