@@ -33,9 +33,9 @@ DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.35  # Reduced - favor passing
 SHOOT_DISTANCE_THRESHOLD = 35.0  # Increased from 25 - shoot from further
 SHOOT_ANGLE_THRESHOLD = 30.0
 
-# Action thresholds - stricter passing requirements
+# Action thresholds - balanced for good passing frequency
 SHOOT_SCORE_THRESHOLD = 0.10  # Very low threshold - shoot frequently when chance arises
-PASS_SCORE_THRESHOLD = 0.25   # Stricter - only pass if it's a safe option
+PASS_SCORE_THRESHOLD = 0.18   # Balanced - safe passes but not too restrictive
 
 # Pass evaluation - no artificial bonus, safety-first approach
 PASS_BONUS = 0.0  # Removed - let natural safety scoring decide
@@ -581,9 +581,9 @@ class Player:
             if best_reach_teammate is None:
                 continue
             
-            # Calculate ball travel time
+            # Calculate ball travel time - allow short passes (min 1.5 units)
             pass_dist = np.linalg.norm(target_pos - self.pos)
-            if pass_dist < 3.0 or pass_dist > 45.0:
+            if pass_dist < 1.5 or pass_dist > 45.0:
                 continue
             ball_time = pass_dist / BALL_PASS_SPEED
             
@@ -591,10 +591,10 @@ class Player:
             if best_reach_time > ball_time + 1.5:
                 continue  # Teammate can't reach in time
             
-            # Check passing lane quality
+            # Check passing lane quality - allow more passes through
             lane_quality = calculate_passing_lane_quality(
                 self.pos, target_pos, ctx.opponent_positions)
-            if lane_quality < 0.3:
+            if lane_quality < 0.2:
                 continue  # Lane is too blocked
             
             # Evaluate interception risk - check all opponents
@@ -661,7 +661,8 @@ class Player:
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
         
-        if pass_dist < 0.5 or pass_dist > 50.0:
+        # Allow short passes (min 1.5 units)
+        if pass_dist < 1.5 or pass_dist > 50.0:
             return 0.0
         
         # Check if this is a back pass (toward own goal)
@@ -827,18 +828,20 @@ class Player:
             lead_factor = 0.3
             target_pos = target_player.pos + target_player.vel * lead_factor * 10
         
-        # Prevent zero-length passes that cause freeze - ensure minimum distance
+        # For very short passes, always pass directly to teammate position
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
-        if pass_dist < 3.0:
-            # Fall back to teammate position if target is too close
+        if pass_dist < 1.5:
+            # Use teammate's actual position for short passes
             target_pos = target_player.pos.copy()
             pass_vec = target_pos - self.pos
             pass_dist = np.linalg.norm(pass_vec)
-            if pass_dist < 1.0:
-                # Emergency: just kick toward attacking goal
-                target_pos = ctx.goal_center
-                pass_vec = target_pos - self.pos
+        
+        # Only apply minimum distance check - no goal redirect
+        if pass_dist < 0.5:
+            # Nudge slightly toward teammate if extremely close
+            to_teammate = normalize(target_player.pos - self.pos)
+            pass_vec = to_teammate * 2.0  # Short gentle pass
         
         pass_dir = normalize(pass_vec)
         game.ball.vel = pass_dir * BALL_PASS_SPEED
