@@ -16,7 +16,7 @@ GOAL_BOTTOM = 60.0
 PLAYER_SPEED = 0.5
 PLAYER_SPRINT_SPEED = 0.7
 BALL_PASS_SPEED = 2.0
-BALL_SHOOT_SPEED = 3.0
+BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.0
 BALL_FRICTION = 0.95
@@ -40,8 +40,8 @@ PASS_SCORE_THRESHOLD = 0.18   # Balanced - safe passes but not too restrictive
 # Pass evaluation - no artificial bonus, safety-first approach
 PASS_BONUS = 0.0  # Removed - let natural safety scoring decide
 
-# Home position attraction weight
-HOME_POSITION_WEIGHT = 0.3  # 30% home bias, 70% tactical
+# Home position attraction weight - lower for more dynamic positioning
+HOME_POSITION_WEIGHT = 0.15  # 15% home bias, 85% tactical - players help attack/defense
 
 # Dribble touch system
 DRIBBLE_TOUCH_INTERVAL = 5  # Every N ticks, ball moves ahead
@@ -426,13 +426,20 @@ class Player:
     def _make_ball_decision(self, ctx, game):
         """Decision making when player has the ball."""
         
-        # GK should pass to defenders, only clear under heavy pressure
+        # GK behavior: pass when safe, throw to corner when under pressure
         if self.role == 'GK':
+            # Check pressure level
+            nearby_opponents = sum(1 for opp_pos in ctx.opponent_positions 
+                                   if np.linalg.norm(opp_pos - self.pos) < 20.0)
+            under_pressure = nearby_opponents >= 1
+            
             pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
-            if pass_score >= 0.2 and pass_option is not None:
+            
+            if not under_pressure and pass_score >= 0.15 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
-                self._execute_clearance(ctx, game)
+                # Under pressure or no safe pass - throw to corner
+                self._execute_gk_throw_to_corner(ctx, game)
             return
         
         # Evaluate all options
@@ -921,6 +928,39 @@ class Player:
         # Track last touch for out-of-bounds decisions
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
     
+    def _execute_gk_throw_to_corner(self, ctx, game):
+        """Goalkeeper throws ball to corner/wing when under pressure."""
+        self.has_ball = False
+        game.ball.owner_id = None
+        
+        # Target corners - pick the side with fewer opponents
+        goal_x = ctx.goal_x
+        
+        # Count opponents on each side
+        top_side_opponents = sum(1 for opp_pos in ctx.opponent_positions if opp_pos[1] < 50)
+        bottom_side_opponents = sum(1 for opp_pos in ctx.opponent_positions if opp_pos[1] >= 50)
+        
+        # Throw to the less crowded side, toward the wing
+        if top_side_opponents <= bottom_side_opponents:
+            target_y = random.uniform(5.0, 20.0)  # Top corner/wing
+        else:
+            target_y = random.uniform(80.0, 95.0)  # Bottom corner/wing
+        
+        # Throw distance - about 30-40 units forward
+        if self.team == 'home':
+            target_x = self.pos[0] + random.uniform(25.0, 40.0)
+        else:
+            target_x = self.pos[0] - random.uniform(25.0, 40.0)
+        target_x = float(np.clip(target_x, 10.0, 90.0))
+        
+        target = np.array([target_x, target_y])
+        throw_dir = normalize(target - self.pos)
+        
+        # GK throws are fast like shots
+        game.ball.vel = throw_dir * BALL_SHOOT_SPEED * 0.8
+        
+        game.last_touch = LastTouch(team=self.team, player_id=self.id)
+
     def _execute_clearance(self, ctx, game):
         """Clear the ball upfield away from danger - evaluate safe directions."""
         self.has_ball = False
@@ -1108,10 +1148,30 @@ class Player:
         # Clamp target to zone with role-based flexibility
         clamped_target = self._clamp_to_zone(tactical_target)
         
-        # Blend with home position - use HOME_POSITION_WEIGHT scaled by role's zone_weight
-        # Defenders blend more toward home, attackers follow tactical target more
-        home_blend = HOME_POSITION_WEIGHT * self.zone_weight
-        blended_target = (1 - home_blend) * clamped_target + home_blend * self.home_pos
+        # DYNAMIC POSITIONING: Shift based on ball position (attack vs defense)
+        # When team is attacking (ball in opponent half), push forward
+        # When team is defending (ball in own half), drop back
+        own_goal_x = 0.0 if self.team == 'home' else 100.0
+        opp_goal_x = 100.0 if self.team == 'home' else 0.0
+        ball_x = game.ball.pos[0]
+        
+        # Calculate attack/defense shift (-1 = full defense, +1 = full attack)
+        if self.team == 'home':
+            attack_shift = (ball_x - 50.0) / 50.0  # Positive when ball is in opponent half
+        else:
+            attack_shift = (50.0 - ball_x) / 50.0
+        attack_shift = float(np.clip(attack_shift, -1.0, 1.0))
+        
+        # Apply shift to home position (move forward when attacking, back when defending)
+        shift_amount = attack_shift * 15.0  # Max 15 units shift
+        if self.team == 'home':
+            shifted_home = np.array([self.home_pos[0] + shift_amount, self.home_pos[1]])
+        else:
+            shifted_home = np.array([self.home_pos[0] - shift_amount, self.home_pos[1]])
+        
+        # Blend with shifted home position - much lower weight for more tactical movement
+        home_blend = HOME_POSITION_WEIGHT * self.zone_weight * 0.5  # Even lower blend
+        blended_target = (1 - home_blend) * clamped_target + home_blend * shifted_home
         
         # Move towards blended target
         to_target = blended_target - self.pos
