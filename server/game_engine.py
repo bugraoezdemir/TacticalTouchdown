@@ -667,10 +667,16 @@ class Player:
                     space_score -= (1.0 - opp_dist / 12.0) * 0.25
             space_score = max(0.0, space_score)
             
-            # Progress toward goal
+            # Progress toward goal - penalize back passes heavily
             my_goal_dist = ctx.dist_to_goal
             target_goal_dist = distance_to_goal(target_pos, ctx.team)
-            progress_score = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
+            is_back_pass = target_goal_dist > my_goal_dist + 5.0
+            
+            # Strong penalty for back passes
+            if is_back_pass:
+                progress_score = 0.1  # Very low score for backward passes
+            else:
+                progress_score = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
             progress_score = float(np.clip(progress_score, 0, 1))
             
             # Teammate accessibility bonus
@@ -712,8 +718,8 @@ class Player:
         target_goal_dist = distance_to_goal(target_pos, ctx.team)
         is_back_pass = target_goal_dist > my_goal_dist + 3.0
         
-        # STRONGER back pass penalty
-        back_pass_penalty = 0.25 if is_back_pass else 0.0
+        # VERY STRONG back pass penalty
+        back_pass_penalty = 0.4 if is_back_pass else 0.0
         
         # Check passing lane quality
         lane_quality = calculate_passing_lane_quality(
