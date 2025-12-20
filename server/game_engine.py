@@ -1202,6 +1202,8 @@ class Player:
             return
         
         # Calculate tactical target when ball is owned
+        skip_zone_blend = False  # Flag to skip home position blending for runs
+        
         if ball_owner.team == self.team:
             # MIDFIELDERS: Make forward runs when team is attacking
             if self.role == 'MID' and ball_owner.id != self.id:
@@ -1212,8 +1214,9 @@ class Player:
                     in_attack = game.ball.pos[0] < 60.0
                 
                 if in_attack:
-                    # Make forward run toward goal
+                    # Make forward run toward goal - skip zone blending
                     tactical_target = self._make_forward_run(ctx, ball_owner, game)
+                    skip_zone_blend = True
                 else:
                     tactical_target = self._find_support_spot(ctx, ball_owner, game)
             else:
@@ -1221,8 +1224,11 @@ class Player:
         else:
             tactical_target = self._get_defend_target(ctx, ball_owner)
         
-        # Clamp target to zone with role-based flexibility
-        clamped_target = self._clamp_to_zone(tactical_target)
+        # Skip clamping for forward runs, otherwise clamp to zone
+        if skip_zone_blend:
+            clamped_target = tactical_target  # Use raw target for forward runs
+        else:
+            clamped_target = self._clamp_to_zone(tactical_target)
         
         # DYNAMIC POSITIONING: Shift based on ball position (attack vs defense)
         # When team is attacking (ball in opponent half), push forward
@@ -1245,9 +1251,13 @@ class Player:
         else:
             shifted_home = np.array([self.home_pos[0] - shift_amount, self.home_pos[1]])
         
-        # Blend with shifted home position - much lower weight for more tactical movement
-        home_blend = HOME_POSITION_WEIGHT * self.zone_weight * 0.5  # Even lower blend
-        blended_target = (1 - home_blend) * clamped_target + home_blend * shifted_home
+        # Skip home blending for forward runs to maintain run direction
+        if skip_zone_blend:
+            blended_target = clamped_target
+        else:
+            # Blend with shifted home position - much lower weight for more tactical movement
+            home_blend = HOME_POSITION_WEIGHT * self.zone_weight * 0.5  # Even lower blend
+            blended_target = (1 - home_blend) * clamped_target + home_blend * shifted_home
         
         # Move towards blended target
         to_target = blended_target - self.pos
