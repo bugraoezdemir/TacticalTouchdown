@@ -493,25 +493,34 @@ class Player:
         # Dribbling allowed in attacking half (< 50 units from goal)
         can_dribble = dist < 50.0
         
-        # DANGER ZONE: Shoot/dribble priority
+        # Check for hot teammate (someone with better shooting chance)
+        hot_teammate, hot_opportunity = self._find_hot_teammate(ctx)
+        
+        # DANGER ZONE: Shoot/dribble priority, but pass to hot teammate
         if dist < 20:
-            if shoot_score > 0.15:
+            if hot_teammate is not None and hot_opportunity > shoot_score + 0.15:
+                # Pass to teammate with better chance
+                self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
+            elif shoot_score > 0.15:
                 self._execute_shoot(ctx, game)
-            elif dribble_score > 0.15 and can_dribble:
+            elif dribble_score > 0.2 and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_shoot(ctx, game)  # Force a shot when close
-        # ATTACK ZONE: Balanced with slight aggression
+        # ATTACK ZONE: Balanced - check for hot teammate before dribbling
         elif dist < 40:
-            if shoot_score > 0.2:
+            if hot_teammate is not None and hot_opportunity > 0.5:
+                # Pass to teammate with good chance
+                self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
+            elif shoot_score > 0.2:
                 self._execute_shoot(ctx, game)
-            elif dribble_score > 0.25 and can_dribble:
+            elif dribble_score > 0.3 and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score >= 0.12 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score > 0.1 and can_dribble:
+            elif dribble_score > 0.15 and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
@@ -1194,7 +1203,21 @@ class Player:
         
         # Calculate tactical target when ball is owned
         if ball_owner.team == self.team:
-            tactical_target = self._find_support_spot(ctx, ball_owner, game)
+            # MIDFIELDERS: Make forward runs when team is attacking
+            if self.role == 'MID' and ball_owner.id != self.id:
+                # Check if ball is in attacking half
+                if self.team == 'home':
+                    in_attack = game.ball.pos[0] > 40.0
+                else:
+                    in_attack = game.ball.pos[0] < 60.0
+                
+                if in_attack:
+                    # Make forward run toward goal
+                    tactical_target = self._make_forward_run(ctx, ball_owner, game)
+                else:
+                    tactical_target = self._find_support_spot(ctx, ball_owner, game)
+            else:
+                tactical_target = self._find_support_spot(ctx, ball_owner, game)
         else:
             tactical_target = self._get_defend_target(ctx, ball_owner)
         
@@ -1247,6 +1270,76 @@ class Player:
             np.clip(pos[0], x_min, x_max),
             np.clip(pos[1], y_min, y_max)
         ])
+
+    def _make_forward_run(self, ctx, ball_owner, game):
+        """Midfielder makes forward run into attacking space."""
+        goal_dir = normalize(ctx.goal_center - self.pos)
+        
+        # Run ahead of ball carrier toward goal
+        run_distance = 15.0 + random.uniform(0, 10)
+        
+        # Add some lateral offset to avoid crowding
+        perp = np.array([-goal_dir[1], goal_dir[0]])
+        lateral_offset = (random.random() - 0.5) * 15.0
+        
+        run_target = self.pos + goal_dir * run_distance + perp * lateral_offset
+        
+        # Keep in bounds
+        run_target[0] = float(np.clip(run_target[0], 10.0, 90.0))
+        run_target[1] = float(np.clip(run_target[1], 10.0, 90.0))
+        
+        return run_target
+
+    def _find_hot_teammate(self, ctx):
+        """Find teammate with best scoring opportunity (in better position than self)."""
+        my_shoot_score = self._evaluate_shoot(ctx)
+        
+        best_teammate = None
+        best_opportunity = 0.0
+        
+        for teammate in ctx.teammates:
+            if teammate.role == 'GK':
+                continue
+            
+            # Calculate teammate's shooting opportunity
+            teammate_dist = distance_to_goal(teammate.pos, ctx.team)
+            
+            if teammate_dist > SHOOT_DISTANCE_THRESHOLD:
+                continue
+            
+            # Check blocking opponents for teammate's shot
+            goal_center = ctx.goal_center
+            blocking = 0
+            for opp_pos in ctx.opponent_positions:
+                if distance_point_to_segment(opp_pos, teammate.pos, goal_center) < 4.0:
+                    blocking += 1
+            
+            # Calculate opportunity score
+            if teammate_dist < 15:
+                dist_factor = 1.0
+            elif teammate_dist < 25:
+                dist_factor = 0.8
+            else:
+                dist_factor = 0.4
+            
+            if blocking == 0:
+                block_factor = 1.2
+            elif blocking == 1:
+                block_factor = 0.6
+            else:
+                block_factor = 0.2
+            
+            opportunity = dist_factor * block_factor
+            
+            # Check if pass to this teammate is safe
+            lane_quality = calculate_passing_lane_quality(self.pos, teammate.pos, ctx.opponent_positions)
+            
+            # Only consider if better than our own shot AND pass is safe
+            if opportunity > my_shoot_score + 0.1 and opportunity > best_opportunity and lane_quality > 0.4:
+                best_opportunity = opportunity
+                best_teammate = teammate
+        
+        return best_teammate, best_opportunity
 
     def _find_support_spot(self, ctx, ball_owner, game):
         """Find best support position - safe for receiving passes, within zone."""
