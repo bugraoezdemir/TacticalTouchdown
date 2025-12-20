@@ -21,11 +21,12 @@ BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.0
 BALL_FRICTION = 0.95
 
-# Decision weights - safety-first passing with stricter thresholds
-PASS_SAFETY_WEIGHT = 0.6       # Was 0.5 - value safe passes more
-PASS_GOAL_PROGRESS_WEIGHT = 0.3 # Was 0.4 - balance with safety
-PASS_DISTANCE_WEIGHT = 0.3
+# Decision weights - forward-focused passing
+PASS_SAFETY_WEIGHT = 0.35      # Reduced - balance with progress
+PASS_GOAL_PROGRESS_WEIGHT = 0.45 # Increased - prioritize forward movement
+PASS_DISTANCE_WEIGHT = 0.2
 SPACE_PASS_BONUS = 0.15  # Re-enabled for space passes
+FORWARD_PASS_BONUS = 0.2  # Bonus for passes that significantly advance the ball
 
 DRIBBLE_CLEARANCE_WEIGHT = 0.35  # Reduced - dribble less
 DRIBBLE_GOAL_PROGRESS_WEIGHT = 0.35  # Reduced - favor passing
@@ -674,17 +675,22 @@ class Player:
                     space_score -= (1.0 - opp_dist / 12.0) * 0.25
             space_score = max(0.0, space_score)
             
-            # Progress toward goal - penalize back passes heavily
+            # Progress toward goal - strongly reward forward passes
             my_goal_dist = ctx.dist_to_goal
             target_goal_dist = distance_to_goal(target_pos, ctx.team)
+            goal_progress = my_goal_dist - target_goal_dist  # Positive = forward
             is_back_pass = target_goal_dist > my_goal_dist + 5.0
+            is_forward_pass = goal_progress > 8.0  # Significant forward movement
             
-            # Strong penalty for back passes
+            # Calculate progress score
             if is_back_pass:
-                progress_score = 0.1  # Very low score for backward passes
+                progress_score = 0.05  # Very low score for backward passes
             else:
-                progress_score = 0.5 + 0.5 * (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
+                progress_score = 0.5 + 0.5 * goal_progress / max(my_goal_dist, 1)
             progress_score = float(np.clip(progress_score, 0, 1))
+            
+            # Forward pass bonus
+            forward_bonus = FORWARD_PASS_BONUS if is_forward_pass else 0.0
             
             # Teammate accessibility bonus
             access_score = 1.0 - min(best_reach_time / 3.0, 1.0)
@@ -693,15 +699,16 @@ class Player:
             combined_safety = safety_score * lane_quality
             
             score = (
-                0.45 * combined_safety +
-                0.20 * space_score +
-                0.20 * progress_score +
-                0.15 * access_score -
+                PASS_SAFETY_WEIGHT * combined_safety +
+                0.15 * space_score +
+                PASS_GOAL_PROGRESS_WEIGHT * progress_score +
+                0.05 * access_score +
+                forward_bonus -
                 vision_penalty
             )
             
-            # Bonus for very safe options in clear lanes
-            if combined_safety > 0.6 and space_score > 0.6:
+            # Bonus for very safe forward options
+            if combined_safety > 0.5 and is_forward_pass:
                 score += SPACE_PASS_BONUS
             
             if score > best_score:
@@ -929,34 +936,80 @@ class Player:
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
     
     def _execute_gk_throw_to_corner(self, ctx, game):
-        """Goalkeeper throws ball to corner/wing when under pressure."""
+        """Goalkeeper throws ball to corner/wing - evaluates multiple safe targets."""
         self.has_ball = False
         game.ball.owner_id = None
         
-        # Target corners - pick the side with fewer opponents
-        goal_x = ctx.goal_x
+        # Generate multiple wide/corner targets and pick safest
+        candidates = []
         
-        # Count opponents on each side
-        top_side_opponents = sum(1 for opp_pos in ctx.opponent_positions if opp_pos[1] < 50)
-        bottom_side_opponents = sum(1 for opp_pos in ctx.opponent_positions if opp_pos[1] >= 50)
-        
-        # Throw to the less crowded side, toward the wing
-        if top_side_opponents <= bottom_side_opponents:
-            target_y = random.uniform(5.0, 20.0)  # Top corner/wing
-        else:
-            target_y = random.uniform(80.0, 95.0)  # Bottom corner/wing
-        
-        # Throw distance - about 30-40 units forward
+        # Forward direction based on team
         if self.team == 'home':
-            target_x = self.pos[0] + random.uniform(25.0, 40.0)
+            forward_distances = [25.0, 35.0, 45.0]
+            get_target_x = lambda d: min(self.pos[0] + d, 90.0)
         else:
-            target_x = self.pos[0] - random.uniform(25.0, 40.0)
-        target_x = float(np.clip(target_x, 10.0, 90.0))
+            forward_distances = [25.0, 35.0, 45.0]
+            get_target_x = lambda d: max(self.pos[0] - d, 10.0)
         
-        target = np.array([target_x, target_y])
-        throw_dir = normalize(target - self.pos)
+        # Wide positions - top and bottom wings
+        wing_y_positions = [10.0, 15.0, 20.0, 80.0, 85.0, 90.0]
         
-        # GK throws are fast like shots
+        for dist in forward_distances:
+            target_x = get_target_x(dist)
+            for target_y in wing_y_positions:
+                candidates.append(np.array([target_x, target_y]))
+        
+        # Also add touchline targets for safety clearance
+        for dist in [20.0, 30.0]:
+            target_x = get_target_x(dist)
+            candidates.append(np.array([target_x, 2.0]))   # Near bottom touchline
+            candidates.append(np.array([target_x, 98.0]))  # Near top touchline
+        
+        # Score each candidate based on safety
+        best_target = None
+        best_score = -999.0
+        
+        for target in candidates:
+            throw_vec = target - self.pos
+            throw_dist = np.linalg.norm(throw_vec)
+            if throw_dist < 10.0:
+                continue
+            
+            # Check lane quality and opponent interception
+            lane_quality = calculate_passing_lane_quality(self.pos, target, ctx.opponent_positions)
+            
+            # Calculate time margins
+            min_margin = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                closest = project_point_to_segment(opp_pos, self.pos, target)
+                dist_opp = np.linalg.norm(opp_pos - closest)
+                dist_ball = np.linalg.norm(closest - self.pos)
+                
+                time_ball = dist_ball / (BALL_SHOOT_SPEED * 0.8)
+                time_opp = dist_opp / PLAYER_SPRINT_SPEED
+                margin = time_opp - time_ball
+                min_margin = min(min_margin, float(margin))
+            
+            # Safety score
+            safety = lane_quality * max(0.0, min(1.0, (min_margin + 1.0) / 2.0))
+            
+            # Prefer wide positions (far from center)
+            width_bonus = abs(target[1] - 50.0) / 50.0 * 0.3
+            
+            score = safety + width_bonus
+            
+            if score > best_score:
+                best_score = score
+                best_target = target
+        
+        # If no safe target found, kick to touchline for throw-in
+        if best_target is None or best_score < 0.2:
+            if self.team == 'home':
+                best_target = np.array([self.pos[0] + 20.0, 0.0 if self.pos[1] < 50 else 100.0])
+            else:
+                best_target = np.array([self.pos[0] - 20.0, 0.0 if self.pos[1] < 50 else 100.0])
+        
+        throw_dir = normalize(best_target - self.pos)
         game.ball.vel = throw_dir * BALL_SHOOT_SPEED * 0.8
         
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
