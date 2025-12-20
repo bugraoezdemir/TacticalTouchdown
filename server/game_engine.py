@@ -445,9 +445,36 @@ class Player:
             shoot_score *= game.home_shoot_frequency
             dribble_score *= game.home_dribble_frequency
         
-        # DRIBBLING ONLY ALLOWED IN FINAL THIRD (near opponent goal)
-        in_final_third = ctx.dist_to_goal < 33.0  # Last 1/3 of pitch
-        can_dribble = in_final_third
+        # DISTANCE-BASED BEHAVIOR: closer to goal = more aggressive
+        # Zone 1: Danger zone (< 20 units) - shoot first, dribble second
+        # Zone 2: Attack zone (20-40 units) - balanced, slight dribble preference
+        # Zone 3: Midfield (40-60 units) - balanced passing and movement
+        # Zone 4: Build-up (> 60 units) - pass-focused, safe play
+        
+        dist = ctx.dist_to_goal
+        
+        # Calculate aggression multiplier based on distance (closer = higher)
+        if dist < 20:
+            shoot_boost = 1.5
+            dribble_boost = 1.3
+            pass_reduction = 0.7
+        elif dist < 40:
+            shoot_boost = 1.2
+            dribble_boost = 1.1
+            pass_reduction = 0.85
+        elif dist < 60:
+            shoot_boost = 1.0
+            dribble_boost = 0.8
+            pass_reduction = 1.0
+        else:
+            shoot_boost = 0.5
+            dribble_boost = 0.5
+            pass_reduction = 1.2
+        
+        # Apply distance-based modifiers
+        shoot_score *= shoot_boost
+        dribble_score *= dribble_boost
+        pass_score *= pass_reduction
         
         # Check pressure level for clearance decision
         min_opp_dist = float('inf')
@@ -455,31 +482,42 @@ class Player:
             d = np.linalg.norm(opp_pos - self.pos)
             min_opp_dist = min(min_opp_dist, float(d))
         
-        # IN FINAL THIRD: Can shoot, pass, or dribble
-        if in_final_third:
-            if shoot_score > 0.25:
+        # Dribbling allowed in attacking half (< 50 units from goal)
+        can_dribble = dist < 50.0
+        
+        # DANGER ZONE: Shoot/dribble priority
+        if dist < 20:
+            if shoot_score > 0.15:
                 self._execute_shoot(ctx, game)
-            elif pass_score >= 0.15 and pass_option is not None:
+            elif dribble_score > 0.15 and can_dribble:
+                self._execute_dribble(ctx, game, dribble_dir)
+            elif pass_score >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score > 0.2:
+            else:
+                self._execute_shoot(ctx, game)  # Force a shot when close
+        # ATTACK ZONE: Balanced with slight aggression
+        elif dist < 40:
+            if shoot_score > 0.2:
+                self._execute_shoot(ctx, game)
+            elif dribble_score > 0.25 and can_dribble:
+                self._execute_dribble(ctx, game, dribble_dir)
+            elif pass_score >= 0.12 and pass_option is not None:
+                self._execute_pass(ctx, game, pass_option, pass_target)
+            elif dribble_score > 0.1 and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_dribble(ctx, game, dribble_dir)
+        # MIDFIELD/BUILD-UP: Pass-focused
         else:
-            # OUTSIDE FINAL THIRD: Short passing only, no dribbling
-            # Only clear under EXTREME pressure with no pass option
             if pass_score >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             elif min_opp_dist < 5.0 and pass_score < 0.1:
-                # Under extreme pressure with no pass - clear
                 self._execute_clearance(ctx, game)
             elif pass_option is not None:
-                # Any pass is better than clearance
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
-                # No pass option at all - must clear
                 self._execute_clearance(ctx, game)
 
     def _evaluate_shoot(self, ctx):
