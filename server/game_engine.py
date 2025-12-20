@@ -1229,16 +1229,16 @@ class Player:
             team_has_possession = (game.last_touch.team == self.team)
         
         if team_has_possession:
-            # MIDFIELDERS: Make forward runs when team is attacking
+            # MIDFIELDERS: Make forward runs when team has possession
             if self.role == 'MID' and (ball_owner is None or ball_owner.id != self.id):
-                # Check if ball is in attacking half
+                # Check if ball is past own defensive third (more permissive)
                 if self.team == 'home':
-                    in_attack = game.ball.pos[0] > 40.0
+                    can_run_forward = game.ball.pos[0] > 25.0  # Past own third
                 else:
-                    in_attack = game.ball.pos[0] < 60.0
+                    can_run_forward = game.ball.pos[0] < 75.0
                 
-                if in_attack:
-                    # Make forward run toward goal - skip zone blending
+                if can_run_forward:
+                    # Make continuous forward run toward goal - skip zone blending
                     tactical_target = self._make_forward_run(ctx, ball_owner, game)
                     skip_zone_blend = True
                 else:
@@ -1308,28 +1308,44 @@ class Player:
         ])
 
     def _make_forward_run(self, ctx, ball_owner, game):
-        """Midfielder makes aggressive forward run into attacking space ahead of the ball."""
+        """Midfielder makes aggressive forward run into attacking/scoring areas."""
         ball_pos = game.ball.pos
         goal_center = ctx.goal_center
         
-        # Direction from ball toward goal
-        ball_to_goal = goal_center - ball_pos
-        goal_dir = normalize(ball_to_goal)
+        # Direction from current position toward goal (run past ball if needed)
+        my_to_goal = goal_center - self.pos
+        goal_dir = normalize(my_to_goal)
+        my_dist_to_goal = np.linalg.norm(my_to_goal)
         
-        # Run 15-22 units ahead of the ball toward goal
-        run_distance = 18.0 + random.uniform(0, 6)
+        # Continuous run - go as deep as possible while staying ahead of ball
+        # More aggressive: run 20-30 units toward goal from current position
+        if my_dist_to_goal > 35:
+            # Far from goal - make longer run
+            run_distance = 25.0 + random.uniform(0, 10)
+        elif my_dist_to_goal > 20:
+            # Getting closer - run into scoring zone
+            run_distance = 18.0 + random.uniform(0, 8)
+        else:
+            # Already in scoring zone - position for shot
+            run_distance = 8.0 + random.uniform(0, 6)
         
         # Offset to half-space (channel between center and wing)
         perp = np.array([-goal_dir[1], goal_dir[0]])
-        # Choose side based on player's current position relative to ball
-        side = 1 if self.pos[1] > ball_pos[1] else -1
-        lateral_offset = side * (12.0 + random.uniform(0, 8))
+        # Choose side based on player's current position relative to goal center
+        side = 1 if self.pos[1] > 50 else -1
         
-        # Target is ahead of ball, offset to half-space
-        run_target = ball_pos + goal_dir * run_distance + perp * lateral_offset
+        # Vary lateral position - sometimes cut inside, sometimes stay wide
+        if my_dist_to_goal < 30:
+            # Near goal - tighter positioning for shooting angle
+            lateral_offset = side * (8.0 + random.uniform(0, 6))
+        else:
+            lateral_offset = side * (12.0 + random.uniform(0, 10))
         
-        # Keep in bounds with margin
-        run_target[0] = float(np.clip(run_target[0], 8.0, 92.0))
+        # Target is ahead toward goal from current position
+        run_target = self.pos + goal_dir * run_distance + perp * lateral_offset
+        
+        # Allow runs deep into attacking area
+        run_target[0] = float(np.clip(run_target[0], 5.0, 95.0))
         run_target[1] = float(np.clip(run_target[1], 8.0, 92.0))
         
         return run_target
