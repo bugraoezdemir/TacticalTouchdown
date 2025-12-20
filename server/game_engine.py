@@ -581,10 +581,12 @@ class Player:
             if best_reach_teammate is None:
                 continue
             
-            # Calculate ball travel time - allow short passes (min 1.5 units)
+            # Calculate ball travel time - no minimum distance restriction
             pass_dist = np.linalg.norm(target_pos - self.pos)
-            if pass_dist < 1.5 or pass_dist > 45.0:
+            if pass_dist > 45.0:
                 continue
+            if pass_dist < 0.5:
+                continue  # Only skip if literally on top of target
             ball_time = pass_dist / BALL_PASS_SPEED
             
             # Check if teammate can reach target before/when ball arrives
@@ -661,8 +663,8 @@ class Player:
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
         
-        # Allow short passes (min 1.5 units)
-        if pass_dist < 1.5 or pass_dist > 50.0:
+        # No minimum distance - allow all short passes
+        if pass_dist < 0.5 or pass_dist > 50.0:
             return 0.0
         
         # Check if this is a back pass (toward own goal)
@@ -823,27 +825,26 @@ class Player:
         self.has_ball = False
         game.ball.owner_id = None
         
-        # Use provided target position (for space passes) or calculate from teammate
+        # Use provided target position (for space passes) or teammate position
         if target_pos is None:
-            lead_factor = 0.3
-            target_pos = target_player.pos + target_player.vel * lead_factor * 10
+            # Pass directly to teammate with small lead
+            target_pos = target_player.pos + target_player.vel * 3.0
         
-        # For very short passes, always pass directly to teammate position
+        # ALWAYS pass toward the target - never redirect to goal
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
-        if pass_dist < 1.5:
-            # Use teammate's actual position for short passes
-            target_pos = target_player.pos.copy()
-            pass_vec = target_pos - self.pos
+        
+        # If target is very close, pass directly to teammate
+        if pass_dist < 2.0:
+            pass_vec = target_player.pos - self.pos
             pass_dist = np.linalg.norm(pass_vec)
         
-        # Only apply minimum distance check - no goal redirect
+        # Safety: if still too close, use direction to teammate
         if pass_dist < 0.5:
-            # Nudge slightly toward teammate if extremely close
-            to_teammate = normalize(target_player.pos - self.pos)
-            pass_vec = to_teammate * 2.0  # Short gentle pass
+            pass_dir = normalize(target_player.pos - self.pos)
+        else:
+            pass_dir = normalize(pass_vec)
         
-        pass_dir = normalize(pass_vec)
         game.ball.vel = pass_dir * BALL_PASS_SPEED
         
         # Track last touch
