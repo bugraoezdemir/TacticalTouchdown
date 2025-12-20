@@ -1221,9 +1221,16 @@ class Player:
         # Calculate tactical target when ball is owned
         skip_zone_blend = False  # Flag to skip home position blending for runs
         
-        if ball_owner.team == self.team:
+        # Check team possession - based on last touch when ball is loose, or ball owner
+        team_has_possession = False
+        if ball_owner is not None:
+            team_has_possession = (ball_owner.team == self.team)
+        elif game.last_touch is not None:
+            team_has_possession = (game.last_touch.team == self.team)
+        
+        if team_has_possession:
             # MIDFIELDERS: Make forward runs when team is attacking
-            if self.role == 'MID' and ball_owner.id != self.id:
+            if self.role == 'MID' and (ball_owner is None or ball_owner.id != self.id):
                 # Check if ball is in attacking half
                 if self.team == 'home':
                     in_attack = game.ball.pos[0] > 40.0
@@ -1235,11 +1242,11 @@ class Player:
                     tactical_target = self._make_forward_run(ctx, ball_owner, game)
                     skip_zone_blend = True
                 else:
-                    tactical_target = self._find_support_spot(ctx, ball_owner, game)
+                    tactical_target = self._find_support_spot(ctx, ball_owner, game) if ball_owner else self.home_pos.copy()
             else:
-                tactical_target = self._find_support_spot(ctx, ball_owner, game)
+                tactical_target = self._find_support_spot(ctx, ball_owner, game) if ball_owner else self.home_pos.copy()
         else:
-            tactical_target = self._get_defend_target(ctx, ball_owner)
+            tactical_target = self._get_defend_target(ctx, ball_owner) if ball_owner else self.home_pos.copy()
         
         # Skip clamping for forward runs, otherwise clamp to zone
         if skip_zone_blend:
