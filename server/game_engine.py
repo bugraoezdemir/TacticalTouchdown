@@ -1039,6 +1039,7 @@ class Player:
         # Release ball ownership - this is a kick, not attached ball
         self.has_ball = False
         game.ball.owner_id = None
+        game.ball.clear_pass_target()  # Clear any stale pass targeting
         
         # Set touch cooldown - cannot reacquire ball for DRIBBLE_TOUCH_INTERVAL ticks
         # Each tick is 0.1 time units, so multiply by 0.1
