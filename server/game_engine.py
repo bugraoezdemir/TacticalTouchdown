@@ -1672,25 +1672,47 @@ class Player:
         
         # SHOT INCOMING: Only move laterally (stay on goal line)
         if shot_incoming:
-            # Project where ball will cross goal line
-            if ball_speed > 0.1:
-                time_to_goal = ball_dist_to_goal / abs(ball_vel[0]) if abs(ball_vel[0]) > 0.1 else 10.0
-                predicted_y = ball_pos[1] + ball_vel[1] * time_to_goal
-                predicted_y = np.clip(predicted_y, GOAL_TOP - 2, GOAL_BOTTOM + 2)
+            # Project where ball will cross goal line using proper trajectory math
+            x_vel = ball_vel[0]
+            y_vel = ball_vel[1]
+            
+            # Calculate time for ball to reach goal line
+            if self.team == 'home':
+                # Ball moving toward x=0
+                if x_vel < -0.1:
+                    time_to_goal = (own_goal_x - ball_pos[0]) / x_vel
+                else:
+                    time_to_goal = 10.0
             else:
-                predicted_y = ball_pos[1]
+                # Ball moving toward x=100
+                if x_vel > 0.1:
+                    time_to_goal = (own_goal_x - ball_pos[0]) / x_vel
+                else:
+                    time_to_goal = 10.0
             
-            # Move ONLY laterally to intercept
-            target_x = goal_x  # Stay on goal line
-            target_y = predicted_y
-            target_y = np.clip(target_y, 38.0, 62.0)
+            # Ensure positive time
+            time_to_goal = max(0.0, time_to_goal)
             
-            # Calculate lateral movement only
-            lateral_diff = target_y - self.pos[1]
-            if abs(lateral_diff) > 0.5:
-                self.vel = np.array([0.0, np.sign(lateral_diff) * GK_SPRINT_SPEED])
+            # Project Y position at goal line
+            predicted_y = ball_pos[1] + y_vel * time_to_goal
+            
+            # Clamp to goal posts
+            predicted_y = float(np.clip(predicted_y, GOAL_TOP, GOAL_BOTTOM))
+            
+            # Move laterally toward predicted position - proportional control
+            lateral_diff = predicted_y - self.pos[1]
+            
+            # Move at speed proportional to distance, capped at sprint speed
+            if abs(lateral_diff) > 0.3:
+                move_speed = min(abs(lateral_diff) * 0.5, GK_SPRINT_SPEED)
+                self.vel = np.array([0.0, np.sign(lateral_diff) * move_speed])
             else:
                 self.vel = np.zeros(2)
+            
+            # Also ensure GK stays on goal line
+            if abs(self.pos[0] - goal_x) > 1.0:
+                self.vel[0] = np.sign(goal_x - self.pos[0]) * GK_SPEED
+            
             return
         
         # If ball is loose and in penalty area, GK can chase it - FAST
