@@ -1245,10 +1245,13 @@ class Player:
                     best_clearance = -1.0  # Initialize low to find maximum
                     for sign in [1.0, -1.0]:
                         test_pos = self.pos + perp * sign * 5.0
-                        nearest_opp_dist = min(
-                            np.linalg.norm(test_pos - opp_pos) 
-                            for opp_pos in ctx.opponent_positions
-                        ) if ctx.opponent_positions else 50.0
+                        if len(ctx.opponent_positions) > 0:
+                            nearest_opp_dist = float(min(
+                                float(np.linalg.norm(test_pos - opp_pos))
+                                for opp_pos in ctx.opponent_positions
+                            ))
+                        else:
+                            nearest_opp_dist = 50.0
                         if nearest_opp_dist > best_clearance:  # Pick side with MORE space
                             best_clearance = nearest_opp_dist
                             best_perp = perp * sign
