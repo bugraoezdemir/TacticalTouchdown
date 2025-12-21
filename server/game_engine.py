@@ -525,20 +525,31 @@ class Player:
         
         # DANGER ZONE: Shoot/dribble priority, but pass to hot teammate
         if dist < 20:
-            if hot_teammate is not None and hot_opportunity > shoot_score_adj + 0.1:
+            # Forwards should still consider hot teammates even with good shot
+            if hot_teammate is not None and hot_opportunity > 0.5 and random.random() < 0.4:
+                # 40% chance to pass to hot teammate even if we could shoot
+                self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
+            elif hot_teammate is not None and hot_opportunity > shoot_score_adj:
                 # Pass to teammate with better chance
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
             elif shoot_score_adj > 0.12 * rand_factor:
                 self._execute_shoot(ctx, game)
-            elif dribble_score_adj > 0.18 * rand_factor and can_dribble:
+            elif dribble_score_adj > 0.2 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score_adj >= 0.08 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_shoot(ctx, game)  # Force a shot when close
-        # ATTACK ZONE: Balanced - check for runway pass and hot teammate
+        # ATTACK ZONE: Balanced - forwards consider passing more
         elif dist < 40:
-            if runway_score_adj > 0.32 * rand_factor and runway_target is not None:
+            # Forwards: probabilistically choose between actions
+            if self.role == 'FWD' and hot_teammate is not None and hot_opportunity > 0.4:
+                # Forwards pass to hot teammates more often
+                if random.random() < 0.5:  # 50% chance to pass
+                    self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
+                    return
+            
+            if runway_score_adj > 0.30 * rand_factor and runway_target is not None:
                 # Execute through ball to create scoring opportunity
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
             elif hot_teammate is not None and hot_opportunity > 0.35 * rand_factor:
@@ -546,11 +557,11 @@ class Player:
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
             elif shoot_score_adj > 0.18 * rand_factor:
                 self._execute_shoot(ctx, game)
-            elif dribble_score_adj > 0.25 * rand_factor and can_dribble:
+            elif dribble_score_adj > 0.28 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score_adj >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score_adj > 0.12 * rand_factor and can_dribble:
+            elif dribble_score_adj > 0.15 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
