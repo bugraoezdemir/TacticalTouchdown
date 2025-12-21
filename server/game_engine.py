@@ -534,9 +534,39 @@ class Player:
                 self._execute_dribble(ctx, game, dribble_dir)
             else:
                 self._execute_shoot(ctx, game)  # Force a shot when close
-        # ATTACK ZONE: Shoot > pass to HOT teammate > dribble
+        # ATTACK ZONE: Shoot > pass to HOT teammate > winger cross > dribble
         elif dist < 40:
-            if shoot_score_adj > 0.18 * rand_factor:
+            # WINGER SPECIAL: Near sideline, consider dribbling down line or crossing
+            is_winger = self.role in ['MID', 'FWD'] and self.lateral_role in ['left', 'right']
+            near_sideline = (self.lateral_role == 'left' and self.pos[1] < 15) or \
+                           (self.lateral_role == 'right' and self.pos[1] > 85)
+            in_final_third = (ctx.team == 'home' and self.pos[0] > 70) or \
+                            (ctx.team == 'away' and self.pos[0] < 30)
+            
+            # Check for clearance along the byline before winger special
+            byline_dir = np.array([1.0 if ctx.team == 'home' else -1.0, 0.0])
+            byline_clearance = clearance_in_direction(self.pos, byline_dir, ctx.opponent_positions)
+            has_teammates_in_box = any(
+                (ctx.team == 'home' and t.pos[0] > 75 and 35 < t.pos[1] < 65) or
+                (ctx.team == 'away' and t.pos[0] < 25 and 35 < t.pos[1] < 65)
+                for t in ctx.teammates if t.role != 'GK'
+            )
+            
+            winger_action_taken = False
+            if is_winger and near_sideline and in_final_third and (byline_clearance > 8.0 or has_teammates_in_box):
+                # Winger near byline with space or teammates to cross to
+                if byline_clearance > 10.0 and random.random() < 0.5:
+                    # Dribble along the sideline toward goal line
+                    self._execute_dribble(ctx, game, byline_dir)
+                    winger_action_taken = True
+                elif has_teammates_in_box:
+                    # Cross into the box
+                    self._execute_cross(ctx, game)
+                    winger_action_taken = True
+            
+            if winger_action_taken:
+                return
+            elif shoot_score_adj > 0.18 * rand_factor:
                 self._execute_shoot(ctx, game)
             elif runway_score_adj > 0.30 * rand_factor and runway_target is not None:
                 # Execute through ball to create scoring opportunity
@@ -864,13 +894,30 @@ class Player:
         return max(0.0, float(score))
 
     def _evaluate_dribble(self, ctx):
-        """Evaluate dribbling options. Returns (best_direction, score)."""
+        """Evaluate dribbling options with opponent avoidance. Returns (best_direction, score)."""
         
-        num_directions = 12
+        num_directions = 16  # More directions for finer control
         angles = np.linspace(0, 2 * np.pi, num_directions, endpoint=False)
         
         best_dir = normalize(ctx.goal_center - self.pos)
         best_score = 0.0
+        
+        # Calculate avoidance vector - sum of repulsion from nearby opponents
+        avoidance_vec = np.zeros(2)
+        for opp_pos in ctx.opponent_positions:
+            to_me = self.pos - opp_pos
+            dist = np.linalg.norm(to_me)
+            if dist < 15.0 and dist > 0.1:  # Nearby opponents
+                # Stronger repulsion for closer opponents
+                repulsion_strength = (15.0 - dist) / 15.0
+                avoidance_vec += normalize(to_me) * repulsion_strength
+        
+        # Normalize avoidance if significant
+        avoidance_strength = np.linalg.norm(avoidance_vec)
+        if avoidance_strength > 0.1:
+            avoidance_vec = normalize(avoidance_vec)
+        else:
+            avoidance_vec = np.zeros(2)
         
         for angle in angles:
             direction = np.array([np.cos(angle), np.sin(angle)])
@@ -881,6 +928,15 @@ class Player:
             goal_dir = normalize(ctx.goal_center - self.pos)
             alignment = np.dot(direction, goal_dir)
             goal_factor = (alignment + 1) / 2
+            
+            # OPPONENT AVOIDANCE: Bonus for directions that align with avoidance, penalty for moving into pressure
+            avoidance_bonus = 0.0
+            if avoidance_strength > 0.1:
+                avoidance_alignment = np.dot(direction, avoidance_vec)
+                if avoidance_alignment > 0:
+                    avoidance_bonus = avoidance_alignment * 0.5  # Bonus for moving away
+                else:
+                    avoidance_bonus = avoidance_alignment * 0.6  # Stronger penalty for moving into pressure
             
             if ctx.team == 'home' and direction[0] < -0.5:
                 goal_factor *= 0.3
@@ -893,7 +949,8 @@ class Player:
             
             score = (
                 DRIBBLE_CLEARANCE_WEIGHT * clearance_factor +
-                DRIBBLE_GOAL_PROGRESS_WEIGHT * goal_factor
+                DRIBBLE_GOAL_PROGRESS_WEIGHT * goal_factor +
+                avoidance_bonus
             )
             
             if score > best_score:
@@ -1532,6 +1589,65 @@ class Player:
         
         return lead_target, score
 
+    def _execute_cross(self, ctx, game):
+        """Winger crosses ball into the penalty area toward teammates."""
+        self.has_ball = False
+        game.ball.owner_id = None
+        
+        # Find best target in the box
+        goal_x = 100.0 if ctx.team == 'home' else 0.0
+        penalty_x = 85.0 if ctx.team == 'home' else 15.0
+        
+        best_target = None
+        best_score = 0.0
+        
+        for teammate in ctx.teammates:
+            if teammate.role == 'GK':
+                continue
+            
+            # Check if teammate is in/near the box
+            in_box = (ctx.team == 'home' and teammate.pos[0] > penalty_x - 10) or \
+                    (ctx.team == 'away' and teammate.pos[0] < penalty_x + 10)
+            
+            if not in_box:
+                continue
+            
+            # Score based on position - prefer central, near goal
+            dist_to_goal = abs(teammate.pos[0] - goal_x)
+            centrality = 1.0 - abs(teammate.pos[1] - 50.0) / 50.0
+            
+            # Check for defenders near target
+            nearby_defenders = 0
+            for opp_pos in ctx.opponent_positions:
+                if np.linalg.norm(opp_pos - teammate.pos) < 5.0:
+                    nearby_defenders += 1
+            
+            score = centrality * (1.0 - dist_to_goal / 30.0) * (1.0 - nearby_defenders * 0.3)
+            
+            if score > best_score:
+                best_score = score
+                best_target = teammate.pos.copy()
+        
+        # Default cross target: near post or far post
+        if best_target is None:
+            if self.lateral_role == 'left':
+                best_target = np.array([penalty_x, 55.0])  # Far post
+            else:
+                best_target = np.array([penalty_x, 45.0])  # Near post
+        
+        # Add some randomness to cross target
+        best_target[1] += random.uniform(-3.0, 3.0)
+        
+        # Execute the cross - higher arc (slightly slower, more lofted)
+        cross_vec = best_target - self.pos
+        cross_dir = normalize(cross_vec)
+        
+        # Set ball position to player's position (like other pass executions)
+        game.ball.pos = self.pos.copy()
+        game.ball.vel = cross_dir * BALL_PASS_SPEED * 0.9  # Slightly slower for "loft"
+        
+        game.last_touch = LastTouch(team=self.team, player_id=self.id)
+
     def _execute_runway_pass(self, ctx, game, teammate, lead_target):
         """Execute a lead pass to where teammate is running."""
         self.has_ball = False
@@ -1546,7 +1662,7 @@ class Player:
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
     def _find_support_spot(self, ctx, ball_owner, game):
-        """Find best support position - safe for receiving passes, within zone."""
+        """Find best support position - safe for receiving passes, minimizing interception risk."""
         # Generate candidate positions (unclamped first)
         candidates = []
         
@@ -1563,9 +1679,39 @@ class Player:
         candidates.append(self.pos + perp * 8.0)
         candidates.append(self.pos - perp * 8.0)
         candidates.append(self.pos + goal_dir * 8.0 + perp * 6.0)
+        
+        # 4. PASS RECIPIENT MOVEMENT: If ahead of ball, find open passing lanes
+        if ball_owner is not None:
+            my_dist_to_goal = distance_to_goal(self.pos, self.team)
+            ball_dist_to_goal = distance_to_goal(ball_owner.pos, self.team)
+            
+            # Am I a potential pass recipient? (ahead of ball but not too far)
+            is_ahead = my_dist_to_goal < ball_dist_to_goal - 5.0
+            not_too_far = my_dist_to_goal > ball_dist_to_goal - 30.0
+            
+            if is_ahead and not_too_far and self.role in ['MID', 'FWD']:
+                # Find positions with best passing lane quality from ball carrier
+                for offset_angle in [-45, -30, -15, 0, 15, 30, 45]:
+                    angle_rad = np.radians(offset_angle)
+                    # Direction from ball carrier to goal
+                    to_goal = normalize(ctx.goal_center - ball_owner.pos)
+                    # Rotate to create offset
+                    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+                    rotated = np.array([
+                        to_goal[0] * cos_a - to_goal[1] * sin_a,
+                        to_goal[0] * sin_a + to_goal[1] * cos_a
+                    ])
+                    # Candidate position ahead of ball carrier
+                    for dist in [12.0, 18.0, 25.0]:
+                        cand_pos = ball_owner.pos + rotated * dist
+                        # Keep within bounds
+                        cand_pos[0] = float(np.clip(cand_pos[0], 5.0, 95.0))
+                        cand_pos[1] = float(np.clip(cand_pos[1], 5.0, 95.0))
+                        candidates.append(cand_pos)
+        
         candidates.append(self.pos + goal_dir * 8.0 - perp * 6.0)
         
-        # 4. Support positions relative to ball carrier
+        # 5. Support positions relative to ball carrier
         ball_to_goal = ctx.goal_center - ball_owner.pos
         ball_dir = normalize(ball_to_goal)
         ball_perp = np.array([-ball_dir[1], ball_dir[0]])
@@ -1590,7 +1736,23 @@ class Player:
             
             score = 0.0
             
-            # 1. Pass safety - can ball reach here without interception?
+            # Clamp candidate to zone first, then check if still valid
+            clamped_cand = self._clamp_to_zone(cand)
+            clamped_dist_to_goal = distance_to_goal(clamped_cand, self.team)
+            ball_dist_to_goal = distance_to_goal(ball_owner.pos, self.team)
+            
+            # Skip if clamped position is no longer ahead of ball by at least 5 units
+            if clamped_dist_to_goal > ball_dist_to_goal - 5.0:
+                continue
+            
+            # Use clamped candidate for scoring
+            cand = clamped_cand
+            
+            # 1. PASSING LANE QUALITY - important but balanced
+            lane_quality = calculate_passing_lane_quality(ball_owner.pos, cand, ctx.opponent_positions)
+            score += lane_quality * 0.35
+            
+            # 2. Pass safety - can ball reach here without interception?
             pass_safety = 1.0
             for opp_pos in ctx.opponent_positions:
                 can_intercept, time_margin = time_to_intercept(
@@ -1599,9 +1761,9 @@ class Player:
                 )
                 if can_intercept:
                     pass_safety *= max(0.1, float(0.5 + time_margin))
-            score += pass_safety * 0.4
+            score += pass_safety * 0.25
             
-            # 2. Space from opponents
+            # 3. Space from opponents
             min_opp_dist = 100.0
             for opp_pos in ctx.opponent_positions:
                 d = np.linalg.norm(cand - opp_pos)
