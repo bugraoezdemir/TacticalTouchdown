@@ -15,8 +15,8 @@ GOAL_BOTTOM = 60.0
 # Physics constants
 PLAYER_SPEED = 0.5
 PLAYER_SPRINT_SPEED = 0.7
-GK_SPEED = 0.9  # Goalkeepers move faster
-GK_SPRINT_SPEED = 1.2  # GK sprint is faster
+GK_SPEED = 0.6  # Goalkeepers move at 2/3 speed
+GK_SPRINT_SPEED = 0.8  # GK sprint at 2/3 speed
 GK_DIVE_REACH = 10.0  # How far GK can dive to save
 BALL_PASS_SPEED = 2.0
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
@@ -523,20 +523,18 @@ class Player:
         pass_score_adj = pass_score * random.uniform(0.85, 1.15)
         runway_score_adj = runway_score * random.uniform(0.9, 1.1)
         
-        # DANGER ZONE: Shoot first, then pass to hot teammate, dribble last
+        # DANGER ZONE: Shoot first, then pass to HOT teammate only, dribble last
         if dist < 20:
             if shoot_score_adj > 0.12 * rand_factor:
                 self._execute_shoot(ctx, game)
             elif hot_teammate is not None and hot_opportunity > 0.3:
-                # Pass to hot teammate before considering dribble
+                # Pass ONLY to hot teammate (near goal with scoring chance)
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
-            elif pass_score_adj >= 0.08 and pass_option is not None:
-                self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score_adj > 0.2 * rand_factor and can_dribble:
+            elif dribble_score_adj > 0.15 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             else:
                 self._execute_shoot(ctx, game)  # Force a shot when close
-        # ATTACK ZONE: Shoot > pass to hot teammate > pass > dribble
+        # ATTACK ZONE: Shoot > pass to HOT teammate > dribble
         elif dist < 40:
             if shoot_score_adj > 0.18 * rand_factor:
                 self._execute_shoot(ctx, game)
@@ -544,14 +542,13 @@ class Player:
                 # Execute through ball to create scoring opportunity
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
             elif hot_teammate is not None and hot_opportunity > 0.3:
-                # Pass to hot teammate BEFORE dribbling
+                # Pass ONLY to hot teammate (near goal with scoring chance)
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
-            elif pass_score_adj >= 0.1 and pass_option is not None:
-                self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score_adj > 0.25 * rand_factor and can_dribble:
-                # Dribble only if no good pass options
+            elif dribble_score_adj > 0.20 * rand_factor and can_dribble:
+                # Dribble if no hot teammate available
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_option is not None:
+                # Fall back to normal pass only if can't dribble
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_dribble(ctx, game, dribble_dir)
