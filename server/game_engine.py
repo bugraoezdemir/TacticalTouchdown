@@ -1648,18 +1648,52 @@ class Player:
             own_goal_x = 100.0
         
         ball_pos = game.ball.pos
+        ball_vel = game.ball.vel
+        ball_speed = np.linalg.norm(ball_vel)
         goal_center_y = 50.0  # Center of goal
         
         # Calculate ball distance from goal
         ball_dist_to_goal = abs(ball_pos[0] - own_goal_x)
         ball_close_to_goal = ball_dist_to_goal < 25.0  # Ball within 25 units of goal
         
-        # Check if ball is in GK's penalty area (and loose)
+        # Check if ball is being shot at goal (fast ball moving toward our goal)
+        ball_toward_goal = False
+        if self.team == 'home' and ball_vel[0] < -0.5:
+            ball_toward_goal = True
+        elif self.team == 'away' and ball_vel[0] > 0.5:
+            ball_toward_goal = True
+        
+        shot_incoming = ball_speed > 1.5 and ball_toward_goal and ball_dist_to_goal < 40.0
+        
+        # Check if ball is in GK's penalty area (and loose and NOT a shot)
         ball_in_penalty = (self.team == 'home' and ball_pos[0] < penalty_x) or \
                           (self.team == 'away' and ball_pos[0] > penalty_x)
         
+        # SHOT INCOMING: Only move laterally (stay on goal line)
+        if shot_incoming:
+            # Project where ball will cross goal line
+            if ball_speed > 0.1:
+                time_to_goal = ball_dist_to_goal / abs(ball_vel[0]) if abs(ball_vel[0]) > 0.1 else 10.0
+                predicted_y = ball_pos[1] + ball_vel[1] * time_to_goal
+                predicted_y = np.clip(predicted_y, GOAL_TOP - 2, GOAL_BOTTOM + 2)
+            else:
+                predicted_y = ball_pos[1]
+            
+            # Move ONLY laterally to intercept
+            target_x = goal_x  # Stay on goal line
+            target_y = predicted_y
+            target_y = np.clip(target_y, 38.0, 62.0)
+            
+            # Calculate lateral movement only
+            lateral_diff = target_y - self.pos[1]
+            if abs(lateral_diff) > 0.5:
+                self.vel = np.array([0.0, np.sign(lateral_diff) * GK_SPRINT_SPEED])
+            else:
+                self.vel = np.zeros(2)
+            return
+        
         # If ball is loose and in penalty area, GK can chase it - FAST
-        if game.ball.owner_id is None and ball_in_penalty:
+        if game.ball.owner_id is None and ball_in_penalty and ball_speed < 1.5:
             target_x = np.clip(ball_pos[0], min_x, max_x)
             target_y = np.clip(ball_pos[1], 35.0, 65.0)
             target = np.array([target_x, target_y])
@@ -1903,12 +1937,13 @@ class Game:
         
         # Only assign control if someone is close enough AND not on touch cooldown
         if min_dist < TACKLE_DISTANCE and closest_players:
-            # Filter out players still on dribble cooldown
+            # Filter out players still on cooldown (either dribble or tackle stall)
             eligible_players = [p for p in closest_players if p.touch_cooldown_until <= self.time]
             
             if eligible_players:
                 # Check if this is a tackle (defender winning ball from opponent)
                 previous_owner_team = self.last_touch.team if self.last_touch else None
+                previous_owner_id = self.last_touch.player_id if self.last_touch else None
                 
                 # Random tiebreaker if multiple players equally close
                 controller = random.choice(eligible_players)
@@ -1917,8 +1952,16 @@ class Game:
                 self.ball.owner_id = controller.id
                 self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
                 
-                # TACKLE CLEARANCE: If defender wins ball from opponent, immediately clear it
+                # TACKLE STALL: The player who lost the ball gets a stall cooldown
                 is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
+                if is_tackle and previous_owner_id is not None:
+                    # Find the player who lost the ball and stall them
+                    for p in self.players:
+                        if p.id == previous_owner_id:
+                            p.touch_cooldown_until = self.time + 1.0  # 1 second stall after being tackled
+                            break
+                
+                # TACKLE CLEARANCE: If defender wins ball from opponent, immediately clear it
                 if is_tackle and controller.role == 'DEF':
                     self._execute_tackle_clearance(controller)
         
