@@ -1403,9 +1403,7 @@ class Player:
         return run_target
 
     def _find_hot_teammate(self, ctx):
-        """Find teammate with good scoring opportunity (doesn't need to be better than self for FWD)."""
-        my_shoot_score = min(self._evaluate_shoot(ctx), 0.5)  # Cap own score for fairer comparison
-        
+        """Find teammate with good scoring opportunity using actual shooting evaluation."""
         best_teammate = None
         best_opportunity = 0.0
         
@@ -1413,52 +1411,51 @@ class Player:
             if teammate.role == 'GK':
                 continue
             
-            # Calculate teammate's shooting opportunity
+            # Calculate teammate's distance to goal
             teammate_dist = distance_to_goal(teammate.pos, ctx.team)
             
-            # Extend range to 50 units
-            if teammate_dist > 50:
+            # Must be within shooting range
+            if teammate_dist > SHOOT_DISTANCE_THRESHOLD:
                 continue
             
-            # Check blocking opponents for teammate's shot
-            goal_center = ctx.goal_center
+            # Create a context for the teammate to evaluate their shot
+            teammate_goal_center = np.array([100.0 if ctx.team == 'home' else 0.0, 50.0])
+            
+            # Simple shot evaluation for teammate
+            # Check blocking opponents
             blocking = 0
             for opp_pos in ctx.opponent_positions:
-                if distance_point_to_segment(opp_pos, teammate.pos, goal_center) < 4.0:
+                if distance_point_to_segment(opp_pos, teammate.pos, teammate_goal_center) < 4.0:
                     blocking += 1
             
-            # Calculate opportunity score - more generous
-            if teammate_dist < 18:
-                dist_factor = 1.0
-            elif teammate_dist < 30:
-                dist_factor = 0.8
+            # Distance score
+            if teammate_dist < 15.0:
+                dist_score = 1.0
+            elif teammate_dist < 25.0:
+                dist_score = 0.8
+            elif teammate_dist < 35.0:
+                dist_score = 0.5
             else:
-                dist_factor = 0.5
+                dist_score = 0.3
             
+            # Block penalty - but more lenient
             if blocking == 0:
-                block_factor = 1.0
+                block_score = 1.0
             elif blocking == 1:
-                block_factor = 0.6
+                block_score = 0.7
             else:
-                block_factor = 0.3
+                block_score = 0.4
             
-            opportunity = dist_factor * block_factor
+            # Combined opportunity score
+            opportunity = dist_score * block_score
             
-            # Check if pass to this teammate is safe - relaxed threshold
+            # Check if pass lane is safe (relaxed threshold)
             lane_quality = calculate_passing_lane_quality(self.pos, teammate.pos, ctx.opponent_positions)
             
-            # For forwards: don't require teammate to be BETTER, just decently positioned
-            # This allows passing even when forward has a good shot themselves
-            if self.role == 'FWD':
-                # Forward can pass to any teammate with decent opportunity and safe lane
-                if opportunity > 0.35 and opportunity > best_opportunity and lane_quality > 0.25:
-                    best_opportunity = opportunity
-                    best_teammate = teammate
-            else:
-                # Others: require teammate to be in better position
-                if opportunity > my_shoot_score and opportunity > best_opportunity and lane_quality > 0.3:
-                    best_opportunity = opportunity
-                    best_teammate = teammate
+            # Hot teammate: decent opportunity (>=0.25) AND passable lane (>=0.2)
+            if opportunity >= 0.25 and lane_quality >= 0.2 and opportunity > best_opportunity:
+                best_opportunity = opportunity
+                best_teammate = teammate
         
         return best_teammate, best_opportunity
 
