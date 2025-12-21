@@ -1221,8 +1221,10 @@ class Player:
             return
         
         # PASS RECIPIENT MOVEMENT: When pass is in flight, move perpendicular to receive
+        # ONLY activate if there's an actual pass target (not dribble or shot)
         ball_speed = np.linalg.norm(game.ball.vel)
-        if ball_speed > 0.5 and game.ball.owner_id is None:
+        has_pass_target = game.ball.target_player_id is not None
+        if ball_speed > 0.5 and game.ball.owner_id is None and has_pass_target:
             # Check if I am the intended recipient OR near the ball's path
             am_target = game.ball.target_player_id == self.id
             
