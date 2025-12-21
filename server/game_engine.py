@@ -522,8 +522,8 @@ class Player:
                 self._execute_shoot(ctx, game)  # Force a shot when close
         # ATTACK ZONE: Balanced - check for runway pass and hot teammate
         elif dist < 40:
-            if runway_score > 0.5 and runway_target is not None:
-                # Execute runway pass to create scoring opportunity
+            if runway_score > 0.35 and runway_target is not None:
+                # Execute through ball to create scoring opportunity
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
             elif hot_teammate is not None and hot_opportunity > 0.4:
                 # Pass to teammate with good chance
@@ -542,8 +542,8 @@ class Player:
                 self._execute_dribble(ctx, game, dribble_dir)
         # MIDFIELD/BUILD-UP: Pass-focused with runway option
         else:
-            if runway_score > 0.4 and runway_target is not None and self.role in ['MID', 'FWD']:
-                # Execute runway pass to start attack
+            if runway_score > 0.3 and runway_target is not None and self.role in ['MID', 'FWD']:
+                # Execute through ball to start attack
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
             elif pass_score >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
@@ -1313,45 +1313,76 @@ class Player:
         ])
 
     def _make_forward_run(self, ctx, ball_owner, game):
-        """Midfielder makes aggressive forward run into attacking/scoring areas."""
-        ball_pos = game.ball.pos
+        """Midfielder/winger makes aggressive forward run into attacking/scoring areas."""
         goal_center = ctx.goal_center
         
-        # Direction from current position toward goal (run past ball if needed)
-        my_to_goal = goal_center - self.pos
-        goal_dir = normalize(my_to_goal)
-        my_dist_to_goal = np.linalg.norm(my_to_goal)
+        # WINGER-SPECIFIC RUNS: Wide crossing or diagonal cuts
+        is_winger = self.role == 'FWD' and self.lateral_role in ['left', 'right']
         
-        # Continuous run - go as deep as possible while staying ahead of ball
-        # More aggressive: run 20-30 units toward goal from current position
-        if my_dist_to_goal > 35:
-            # Far from goal - make longer run
-            run_distance = 25.0 + random.uniform(0, 10)
-        elif my_dist_to_goal > 20:
-            # Getting closer - run into scoring zone
-            run_distance = 18.0 + random.uniform(0, 8)
+        if is_winger:
+            # Wingers have two run types: wide byline run or diagonal cut
+            run_type = random.choice(['wide', 'diagonal', 'diagonal'])  # Bias toward diagonal
+            
+            if self.team == 'home':
+                goal_x = 100.0
+                if run_type == 'wide':
+                    # Run to byline for crossing
+                    target_x = 90.0 + random.uniform(0, 8)
+                    if self.lateral_role == 'left':
+                        target_y = 8.0 + random.uniform(0, 12)  # Near top touchline
+                    else:
+                        target_y = 80.0 + random.uniform(0, 12)  # Near bottom touchline
+                else:
+                    # Diagonal cut toward goal
+                    target_x = 85.0 + random.uniform(0, 10)
+                    if self.lateral_role == 'left':
+                        target_y = 30.0 + random.uniform(0, 15)  # Cut inside from left
+                    else:
+                        target_y = 55.0 + random.uniform(0, 15)  # Cut inside from right
+            else:
+                goal_x = 0.0
+                if run_type == 'wide':
+                    target_x = 2.0 + random.uniform(0, 8)
+                    if self.lateral_role == 'left':
+                        target_y = 80.0 + random.uniform(0, 12)
+                    else:
+                        target_y = 8.0 + random.uniform(0, 12)
+                else:
+                    target_x = 5.0 + random.uniform(0, 10)
+                    if self.lateral_role == 'left':
+                        target_y = 55.0 + random.uniform(0, 15)
+                    else:
+                        target_y = 30.0 + random.uniform(0, 15)
+            
+            run_target = np.array([target_x, target_y])
         else:
-            # Already in scoring zone - position for shot
-            run_distance = 8.0 + random.uniform(0, 6)
+            # MIDFIELDER RUNS: Into half-spaces and scoring zones
+            my_to_goal = goal_center - self.pos
+            goal_dir = normalize(my_to_goal)
+            my_dist_to_goal = np.linalg.norm(my_to_goal)
+            
+            # Aggressive run distances
+            if my_dist_to_goal > 35:
+                run_distance = 28.0 + random.uniform(0, 12)
+            elif my_dist_to_goal > 20:
+                run_distance = 20.0 + random.uniform(0, 10)
+            else:
+                run_distance = 10.0 + random.uniform(0, 8)
+            
+            # Half-space positioning
+            perp = np.array([-goal_dir[1], goal_dir[0]])
+            side = 1 if self.pos[1] > 50 else -1
+            
+            if my_dist_to_goal < 30:
+                lateral_offset = side * (6.0 + random.uniform(0, 8))
+            else:
+                lateral_offset = side * (10.0 + random.uniform(0, 12))
+            
+            run_target = self.pos + goal_dir * run_distance + perp * lateral_offset
         
-        # Offset to half-space (channel between center and wing)
-        perp = np.array([-goal_dir[1], goal_dir[0]])
-        # Choose side based on player's current position relative to goal center
-        side = 1 if self.pos[1] > 50 else -1
-        
-        # Vary lateral position - sometimes cut inside, sometimes stay wide
-        if my_dist_to_goal < 30:
-            # Near goal - tighter positioning for shooting angle
-            lateral_offset = side * (8.0 + random.uniform(0, 6))
-        else:
-            lateral_offset = side * (12.0 + random.uniform(0, 10))
-        
-        # Target is ahead toward goal from current position
-        run_target = self.pos + goal_dir * run_distance + perp * lateral_offset
-        
-        # Allow runs deep into attacking area
-        run_target[0] = float(np.clip(run_target[0], 5.0, 95.0))
-        run_target[1] = float(np.clip(run_target[1], 8.0, 92.0))
+        # Clip to field - allow wingers to reach touchline
+        run_target[0] = float(np.clip(run_target[0], 3.0, 97.0))
+        run_target[1] = float(np.clip(run_target[1], 2.0, 98.0))
         
         return run_target
 
@@ -1408,7 +1439,7 @@ class Player:
         return best_teammate, best_opportunity
 
     def _evaluate_runway_pass(self, ctx, teammate):
-        """Evaluate a lead pass to where teammate is running."""
+        """Evaluate a lead pass (through ball) to where teammate is running."""
         if teammate.role == 'GK':
             return None, 0.0
         
@@ -1416,35 +1447,40 @@ class Player:
         teammate_vel = teammate.vel
         teammate_speed = np.linalg.norm(teammate_vel)
         
-        # Only consider if teammate is moving
-        if teammate_speed < 0.3:
-            return None, 0.0
+        # Consider teammates moving OR in good positions ahead
+        teammate_dist_to_goal = distance_to_goal(teammate.pos, ctx.team)
+        my_goal_dist = ctx.dist_to_goal
         
-        teammate_dir = normalize(teammate_vel)
-        
-        # Calculate lead pass target - where teammate will be
-        pass_dist = np.linalg.norm(teammate.pos - self.pos)
-        ball_travel_time = pass_dist / BALL_PASS_SPEED
-        
-        # Lead the pass by 1-2 seconds of teammate movement
-        lead_time = min(ball_travel_time * 1.5, 2.0)
-        lead_target = teammate.pos + teammate_dir * teammate_speed * lead_time * 30  # Scale for game units
+        # If teammate is moving forward
+        if teammate_speed > 0.2:
+            teammate_dir = normalize(teammate_vel)
+            
+            # Longer lead distance for through balls (18-25 units)
+            lead_distance = 18.0 + teammate_speed * 8.0
+            lead_target = teammate.pos + teammate_dir * lead_distance
+        else:
+            # Stationary teammate in good position - pass to space ahead of them
+            if teammate_dist_to_goal >= my_goal_dist - 5:
+                return None, 0.0  # Not ahead of us
+            
+            goal_dir = normalize(ctx.goal_center - teammate.pos)
+            lead_target = teammate.pos + goal_dir * 12.0
         
         # Clamp to field bounds
-        lead_target[0] = float(np.clip(lead_target[0], 5.0, 95.0))
-        lead_target[1] = float(np.clip(lead_target[1], 5.0, 95.0))
+        lead_target[0] = float(np.clip(lead_target[0], 3.0, 97.0))
+        lead_target[1] = float(np.clip(lead_target[1], 3.0, 97.0))
         
-        # Only valuable if pass goes forward toward goal
-        my_goal_dist = ctx.dist_to_goal
+        # Check forward progress
         target_goal_dist = distance_to_goal(lead_target, ctx.team)
+        goal_progress = my_goal_dist - target_goal_dist
         
-        if target_goal_dist >= my_goal_dist:
-            return None, 0.0  # Not a forward pass
+        if goal_progress < 5.0:
+            return None, 0.0  # Not enough forward progress
         
-        # Check lane safety to lead target
+        # Check lane safety - relaxed threshold
         lane_quality = calculate_passing_lane_quality(self.pos, lead_target, ctx.opponent_positions)
         
-        if lane_quality < 0.4:
+        if lane_quality < 0.25:
             return None, 0.0  # Too risky
         
         # Check if teammate can reach the target before opponents
@@ -1455,18 +1491,23 @@ class Player:
             opp_time = np.linalg.norm(lead_target - opp_pos) / PLAYER_SPRINT_SPEED
             min_opp_time = min(min_opp_time, opp_time)
         
-        if teammate_reach_time > min_opp_time - 0.5:
+        time_advantage = min_opp_time - teammate_reach_time
+        if time_advantage < 0.3:
             return None, 0.0  # Opponent would get there first
         
-        # Score based on goal progress and space created
-        progress_score = (my_goal_dist - target_goal_dist) / max(my_goal_dist, 1)
-        space_score = min(min_opp_time / 3.0, 1.0)
+        # Score with generous base for forward progress
+        progress_bonus = 0.25 if goal_progress > 8 else 0.15
+        space_score = min(time_advantage / 2.0, 0.3)
         
-        score = 0.4 * lane_quality + 0.4 * progress_score + 0.2 * space_score
+        score = progress_bonus + 0.3 * lane_quality + space_score
         
-        # Bonus if lead target is in shooting range
+        # Bonus if lead target is in shooting/crossing range
         if target_goal_dist < 25:
-            score += 0.15
+            score += 0.2
+        
+        # Bonus for passes to wingers making runs
+        if teammate.role == 'FWD' and teammate.lateral_role in ['left', 'right']:
+            score += 0.1
         
         return lead_target, score
 
