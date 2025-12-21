@@ -639,9 +639,18 @@ class Player:
         best_target = None
         best_score = 0.0
         
+        # DEFENSIVE ZONE DETECTION: Check if we're near own goal
+        own_goal_x = 0.0 if ctx.team == 'home' else 100.0
+        dist_to_own_goal = abs(self.pos[0] - own_goal_x)
+        in_defensive_third = dist_to_own_goal < 35.0  # Within 35 units of own goal
+        
         # Generate candidate pass positions in 360 degrees at various distances
         num_directions = 16  # Check 16 directions around player
-        pass_distances = [8.0, 15.0, 25.0]  # Short, medium, long
+        # In defensive zone: prefer longer passes
+        if in_defensive_third:
+            pass_distances = [15.0, 25.0, 35.0, 45.0]  # Longer distances in defense
+        else:
+            pass_distances = [8.0, 15.0, 25.0]  # Short, medium, long
         
         candidate_positions = []
         
@@ -778,6 +787,16 @@ class Player:
             # Bonus for very safe forward options
             if combined_safety > 0.5 and is_forward_pass:
                 score += SPACE_PASS_BONUS
+            
+            # DEFENSIVE ZONE PENALTY: Strongly penalize short passes near own goal
+            if in_defensive_third:
+                if pass_dist < 15.0 and goal_progress < 12.0:
+                    score -= 0.6  # Very strong penalty for short lateral passes in defense
+                    # Skip short risky passes entirely if score goes negative
+                    if score < 0.1:
+                        continue
+                elif pass_dist > 30.0 and goal_progress > 5.0:
+                    score += 0.35  # Strong bonus for longer forward clearances
             
             # Collect all viable options instead of just best
             if score > 0.1:  # Minimum viable score
@@ -991,6 +1010,10 @@ class Player:
             # Pass directly to teammate with small lead
             target_pos = target_player.pos + target_player.vel * 3.0
         
+        # Track pass target for recipient movement
+        game.ball.target_player_id = target_player.id
+        game.ball.target_pos = target_pos.copy() if isinstance(target_pos, np.ndarray) else np.array(target_pos)
+        
         # ALWAYS pass toward the target - never redirect to goal
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
@@ -1195,6 +1218,49 @@ class Player:
         if self.role == 'GK':
             self._make_gk_decision(ctx, game)
             return
+        
+        # PASS RECIPIENT MOVEMENT: When pass is in flight, move perpendicular to receive
+        ball_speed = np.linalg.norm(game.ball.vel)
+        if ball_speed > 0.5 and game.ball.owner_id is None:
+            # Check if I am the intended recipient OR near the ball's path
+            am_target = game.ball.target_player_id == self.id
+            
+            # Check if I'm near the ball trajectory
+            if ball_speed > 0.1:
+                ball_dir = normalize(game.ball.vel)
+                ball_future = game.ball.pos + ball_dir * 50.0
+                closest_on_path = project_point_to_segment(self.pos, game.ball.pos, ball_future)
+                dist_to_path = np.linalg.norm(self.pos - closest_on_path)
+                dist_ball_to_me = np.linalg.norm(game.ball.pos - self.pos)
+                
+                # Near the ball's path and ball is coming toward me
+                near_path = dist_to_path < 8.0 and dist_ball_to_me < 30.0
+                
+                if am_target or near_path:
+                    # Calculate perpendicular direction
+                    perp = np.array([-ball_dir[1], ball_dir[0]])
+                    
+                    # Choose direction away from nearest opponent (pick side with MORE space)
+                    best_perp = perp
+                    best_clearance = -1.0  # Initialize low to find maximum
+                    for sign in [1.0, -1.0]:
+                        test_pos = self.pos + perp * sign * 5.0
+                        nearest_opp_dist = min(
+                            np.linalg.norm(test_pos - opp_pos) 
+                            for opp_pos in ctx.opponent_positions
+                        ) if ctx.opponent_positions else 50.0
+                        if nearest_opp_dist > best_clearance:  # Pick side with MORE space
+                            best_clearance = nearest_opp_dist
+                            best_perp = perp * sign
+                    
+                    # Move perpendicular to create receiving angle
+                    move_target = closest_on_path + best_perp * 3.0
+                    move_target = self._clamp_to_zone(move_target)
+                    
+                    to_target = move_target - self.pos
+                    if np.linalg.norm(to_target) > 1.0:
+                        self.vel = normalize(to_target) * PLAYER_SPEED
+                        return
         
         ball_owner = None
         if game.ball.owner_id is not None:
@@ -1930,6 +1996,13 @@ class Ball:
         self.pos = np.array([50.0, 50.0])
         self.vel = np.array([0.0, 0.0])
         self.owner_id: Optional[int] = None
+        self.target_player_id: Optional[int] = None  # Track intended pass recipient
+        self.target_pos: Optional[np.ndarray] = None  # Track pass target position
+
+    def clear_pass_target(self):
+        """Clear pass target info when ball is controlled or goes out."""
+        self.target_player_id = None
+        self.target_pos = None
 
     def to_dict(self):
         return {
@@ -2135,6 +2208,7 @@ class Game:
                 controller.has_ball = True
                 controller.touch_cooldown_until = 0.0  # Reset cooldown on ball acquisition
                 self.ball.owner_id = controller.id
+                self.ball.clear_pass_target()  # Clear pass tracking on control
                 self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
                 
                 # TACKLE STALL: The player who lost the ball gets a stall cooldown
