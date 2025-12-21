@@ -15,11 +15,18 @@ GOAL_BOTTOM = 60.0
 # Physics constants
 PLAYER_SPEED = 0.5
 PLAYER_SPRINT_SPEED = 0.7
+GK_SPEED = 0.9  # Goalkeepers move faster
+GK_SPRINT_SPEED = 1.2  # GK sprint is faster
+GK_DIVE_REACH = 10.0  # How far GK can dive to save
 BALL_PASS_SPEED = 2.0
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.0
 BALL_FRICTION = 0.95
+
+# Probabilistic decision parameters
+DECISION_RANDOMNESS = 0.15  # How much randomness in decisions (0-1)
+PASS_SELECTION_RANDOMNESS = 0.25  # Randomness in pass target selection
 
 # Decision weights - forward-focused passing
 PASS_SAFETY_WEIGHT = 0.35      # Reduced - balance with progress
@@ -507,34 +514,43 @@ class Player:
                     runway_target = target
                     runway_teammate = teammate
         
+        # PROBABILISTIC DECISION-MAKING: Add randomness to thresholds
+        rand_factor = random.uniform(1.0 - DECISION_RANDOMNESS, 1.0 + DECISION_RANDOMNESS)
+        
+        # Randomize scores slightly for varied behavior
+        shoot_score_adj = shoot_score * random.uniform(0.85, 1.15)
+        dribble_score_adj = dribble_score * random.uniform(0.85, 1.15)
+        pass_score_adj = pass_score * random.uniform(0.85, 1.15)
+        runway_score_adj = runway_score * random.uniform(0.9, 1.1)
+        
         # DANGER ZONE: Shoot/dribble priority, but pass to hot teammate
         if dist < 20:
-            if hot_teammate is not None and hot_opportunity > shoot_score + 0.15:
+            if hot_teammate is not None and hot_opportunity > shoot_score_adj + 0.1:
                 # Pass to teammate with better chance
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
-            elif shoot_score > 0.15:
+            elif shoot_score_adj > 0.12 * rand_factor:
                 self._execute_shoot(ctx, game)
-            elif dribble_score > 0.2 and can_dribble:
+            elif dribble_score_adj > 0.18 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
-            elif pass_score >= 0.1 and pass_option is not None:
+            elif pass_score_adj >= 0.08 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_shoot(ctx, game)  # Force a shot when close
         # ATTACK ZONE: Balanced - check for runway pass and hot teammate
         elif dist < 40:
-            if runway_score > 0.35 and runway_target is not None:
+            if runway_score_adj > 0.32 * rand_factor and runway_target is not None:
                 # Execute through ball to create scoring opportunity
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
-            elif hot_teammate is not None and hot_opportunity > 0.4:
+            elif hot_teammate is not None and hot_opportunity > 0.35 * rand_factor:
                 # Pass to teammate with good chance
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
-            elif shoot_score > 0.2:
+            elif shoot_score_adj > 0.18 * rand_factor:
                 self._execute_shoot(ctx, game)
-            elif dribble_score > 0.3 and can_dribble:
+            elif dribble_score_adj > 0.25 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
-            elif pass_score >= 0.12 and pass_option is not None:
+            elif pass_score_adj >= 0.1 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
-            elif dribble_score > 0.15 and can_dribble:
+            elif dribble_score_adj > 0.12 * rand_factor and can_dribble:
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
@@ -542,10 +558,10 @@ class Player:
                 self._execute_dribble(ctx, game, dribble_dir)
         # MIDFIELD/BUILD-UP: Pass-focused with runway option
         else:
-            if runway_score > 0.3 and runway_target is not None and self.role in ['MID', 'FWD']:
+            if runway_score_adj > 0.28 * rand_factor and runway_target is not None and self.role in ['MID', 'FWD']:
                 # Execute through ball to start attack
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
-            elif pass_score >= 0.1 and pass_option is not None:
+            elif pass_score_adj >= 0.08 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             elif min_opp_dist < 5.0 and pass_score < 0.1:
                 self._execute_clearance(ctx, game)
@@ -737,10 +753,14 @@ class Player:
             if combined_safety > 0.5 and is_forward_pass:
                 score += SPACE_PASS_BONUS
             
-            if score > best_score:
-                best_score = score
-                best_teammate = best_reach_teammate
-                best_target = target_pos
+            # Collect all viable options instead of just best
+            if score > 0.1:  # Minimum viable score
+                # Add randomness to score for probabilistic selection
+                randomized_score = score + random.uniform(-PASS_SELECTION_RANDOMNESS, PASS_SELECTION_RANDOMNESS) * score
+                if randomized_score > best_score:
+                    best_score = score  # Store actual score, not randomized
+                    best_teammate = best_reach_teammate
+                    best_target = target_pos
         
         return best_teammate, best_target, best_score
     
@@ -1638,7 +1658,7 @@ class Player:
         ball_in_penalty = (self.team == 'home' and ball_pos[0] < penalty_x) or \
                           (self.team == 'away' and ball_pos[0] > penalty_x)
         
-        # If ball is loose and in penalty area, GK can chase it
+        # If ball is loose and in penalty area, GK can chase it - FAST
         if game.ball.owner_id is None and ball_in_penalty:
             target_x = np.clip(ball_pos[0], min_x, max_x)
             target_y = np.clip(ball_pos[1], 35.0, 65.0)
@@ -1647,7 +1667,7 @@ class Player:
             to_target = target - self.pos
             dist = np.linalg.norm(to_target)
             if dist > 1.0:
-                self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
+                self.vel = normalize(to_target) * GK_SPRINT_SPEED  # GK sprints faster
             else:
                 self.vel = np.zeros(2)
             return
@@ -1655,10 +1675,9 @@ class Player:
         # STAY CENTERED unless ball is close to goal
         target_x = goal_x
         if ball_close_to_goal:
-            # Ball is close - track it laterally but not too aggressively
-            # Ease toward ball y with damping - don't fully commit
-            target_y = goal_center_y + (ball_pos[1] - goal_center_y) * 0.6
-            target_y = np.clip(target_y, 40.0, 60.0)  # Stay within goal posts
+            # Ball is close - track it laterally more aggressively
+            target_y = goal_center_y + (ball_pos[1] - goal_center_y) * 0.8  # More aggressive tracking
+            target_y = np.clip(target_y, 38.0, 62.0)  # Wider range within goal
         else:
             # Ball is far - stay in center of goal
             target_y = goal_center_y
@@ -1668,7 +1687,7 @@ class Player:
         dist = np.linalg.norm(to_target)
         
         if dist > 1.0:
-            self.vel = normalize(to_target) * PLAYER_SPEED * 0.7  # Move slowly to center
+            self.vel = normalize(to_target) * GK_SPEED  # GK moves faster
         else:
             self.vel = np.zeros(2)
 
