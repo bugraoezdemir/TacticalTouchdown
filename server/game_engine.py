@@ -1418,7 +1418,7 @@ class Player:
         return run_target
 
     def _find_hot_teammate(self, ctx):
-        """Find teammate with best scoring opportunity (in better position than self)."""
+        """Find teammate with good scoring opportunity (doesn't need to be better than self for FWD)."""
         my_shoot_score = min(self._evaluate_shoot(ctx), 0.5)  # Cap own score for fairer comparison
         
         best_teammate = None
@@ -1431,8 +1431,8 @@ class Player:
             # Calculate teammate's shooting opportunity
             teammate_dist = distance_to_goal(teammate.pos, ctx.team)
             
-            # Extend range to 45 units (was 35)
-            if teammate_dist > 45:
+            # Extend range to 50 units
+            if teammate_dist > 50:
                 continue
             
             # Check blocking opponents for teammate's shot
@@ -1446,26 +1446,34 @@ class Player:
             if teammate_dist < 18:
                 dist_factor = 1.0
             elif teammate_dist < 30:
-                dist_factor = 0.7
+                dist_factor = 0.8
             else:
-                dist_factor = 0.4
+                dist_factor = 0.5
             
             if blocking == 0:
                 block_factor = 1.0
             elif blocking == 1:
-                block_factor = 0.5
+                block_factor = 0.6
             else:
-                block_factor = 0.2
+                block_factor = 0.3
             
             opportunity = dist_factor * block_factor
             
-            # Check if pass to this teammate is safe - lower threshold
+            # Check if pass to this teammate is safe - relaxed threshold
             lane_quality = calculate_passing_lane_quality(self.pos, teammate.pos, ctx.opponent_positions)
             
-            # Only consider if better than our own shot AND pass is reasonably safe
-            if opportunity > my_shoot_score and opportunity > best_opportunity and lane_quality > 0.3:
-                best_opportunity = opportunity
-                best_teammate = teammate
+            # For forwards: don't require teammate to be BETTER, just decently positioned
+            # This allows passing even when forward has a good shot themselves
+            if self.role == 'FWD':
+                # Forward can pass to any teammate with decent opportunity and safe lane
+                if opportunity > 0.35 and opportunity > best_opportunity and lane_quality > 0.25:
+                    best_opportunity = opportunity
+                    best_teammate = teammate
+            else:
+                # Others: require teammate to be in better position
+                if opportunity > my_shoot_score and opportunity > best_opportunity and lane_quality > 0.3:
+                    best_opportunity = opportunity
+                    best_teammate = teammate
         
         return best_teammate, best_opportunity
 
