@@ -1259,7 +1259,7 @@ class Player:
             self._make_gk_decision(ctx, game)
             return
         
-        # PASS RECIPIENT MOVEMENT: When pass is in flight, move perpendicular to receive
+        # PASS RECIPIENT MOVEMENT: When pass is in flight, move TOWARD ball trajectory to receive
         # ONLY activate if there's an actual pass target (not dribble or shot)
         ball_speed = np.linalg.norm(game.ball.vel)
         has_pass_target = game.ball.target_player_id is not None
@@ -1275,36 +1275,42 @@ class Player:
                 dist_to_path = np.linalg.norm(self.pos - closest_on_path)
                 dist_ball_to_me = np.linalg.norm(game.ball.pos - self.pos)
                 
-                # Near the ball's path and ball is coming toward me
-                near_path = dist_to_path < 8.0 and dist_ball_to_me < 30.0
+                # Near the ball's path - even from long distance for attackers
+                near_path = dist_to_path < 12.0 and dist_ball_to_me < 50.0
                 
                 if am_target or near_path:
-                    # Calculate perpendicular direction
+                    # PRIMARY: Move TOWARD the ball trajectory intercept point
+                    # Calculate where ball will be when we can reach it
+                    time_to_closest = dist_to_path / PLAYER_SPRINT_SPEED
+                    ball_intercept = game.ball.pos + ball_dir * (ball_speed * time_to_closest)
+                    
+                    # Clamp intercept to reasonable range
+                    if np.linalg.norm(ball_intercept - game.ball.pos) > 40.0:
+                        ball_intercept = game.ball.pos + ball_dir * 40.0
+                    
+                    # Move toward intercept point, with slight perpendicular offset for space
                     perp = np.array([-ball_dir[1], ball_dir[0]])
                     
-                    # Choose direction away from nearest opponent (pick side with MORE space)
-                    best_perp = perp
-                    best_clearance = -1.0  # Initialize low to find maximum
-                    for sign in [1.0, -1.0]:
-                        test_pos = self.pos + perp * sign * 5.0
-                        if len(ctx.opponent_positions) > 0:
+                    # Choose perpendicular side with more space
+                    best_offset = 0.0
+                    if len(ctx.opponent_positions) > 0:
+                        for sign in [1.0, -1.0]:
+                            test_pos = closest_on_path + perp * sign * 3.0
                             nearest_opp_dist = float(min(
                                 float(np.linalg.norm(test_pos - opp_pos))
                                 for opp_pos in ctx.opponent_positions
                             ))
-                        else:
-                            nearest_opp_dist = 50.0
-                        if nearest_opp_dist > best_clearance:  # Pick side with MORE space
-                            best_clearance = nearest_opp_dist
-                            best_perp = perp * sign
+                            if abs(best_offset) < 0.1 or nearest_opp_dist > abs(best_offset):
+                                best_offset = sign * 2.0  # Small offset for receiving angle
                     
-                    # Move perpendicular to create receiving angle
-                    move_target = closest_on_path + best_perp * 3.0
+                    # Target is on the ball path with small perpendicular offset
+                    move_target = closest_on_path + perp * best_offset
                     move_target = self._clamp_to_zone(move_target)
                     
                     to_target = move_target - self.pos
-                    if np.linalg.norm(to_target) > 1.0:
-                        self.vel = normalize(to_target) * PLAYER_SPEED
+                    if np.linalg.norm(to_target) > 0.5:
+                        # Sprint to intercept the pass
+                        self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
                         return
         
         ball_owner = None
@@ -2078,6 +2084,8 @@ class Game:
         self.restart_pos = np.array([50.0, 50.0])
         self.restart_team = 'home'
         self.last_ball_pos = np.array([50.0, 50.0])  # Track last in-bounds position
+        self.last_restart_type = None  # Track last restart type (for throw-in goal prevention)
+        self.throw_in_touched = False  # Has ball been touched after throw-in?
         
         # Tactical settings for home team (user controlled)
         self.home_formation = '4-4-2'
@@ -2272,6 +2280,10 @@ class Game:
                 self.ball.clear_pass_target()  # Clear pass tracking on control
                 self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
                 
+                # Mark throw-in as touched (for goal prevention rule)
+                if self.last_restart_type == 'throw_in':
+                    self.throw_in_touched = True
+                
                 # TACKLE STALL: The player who lost the ball gets a stall cooldown
                 is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
                 if is_tackle and previous_owner_id is not None:
@@ -2296,6 +2308,9 @@ class Game:
         # Ball crossed end line (x < 0 or x > 100)
         if x <= 0:
             if GOAL_TOP < y < GOAL_BOTTOM:
+                # Cannot score directly from throw-in
+                if self.last_restart_type == 'throw_in' and not self.throw_in_touched:
+                    return 'goal_kick_home'  # Award goal kick instead
                 return 'goal_away'  # Away team scored (ball in home goal)
             else:
                 # Corner or goal kick based on last touch
@@ -2306,6 +2321,9 @@ class Game:
         
         if x >= 100:
             if GOAL_TOP < y < GOAL_BOTTOM:
+                # Cannot score directly from throw-in
+                if self.last_restart_type == 'throw_in' and not self.throw_in_touched:
+                    return 'goal_kick_away'  # Award goal kick instead
                 return 'goal_home'  # Home team scored
             else:
                 if self.last_touch and self.last_touch.team == 'away':
@@ -2529,6 +2547,8 @@ class Game:
             self.state = GameState.THROW_IN
             self.state_timer = 0.5
             self.restart_team = 'home'
+            self.last_restart_type = 'throw_in'
+            self.throw_in_touched = False
             # Use last in-bounds position for x, clamp y inside field
             y_pos = 2.0 if self.last_ball_pos[1] < 50 else 98.0
             x_pos = float(np.clip(self.last_ball_pos[0], 5, 95))
@@ -2537,6 +2557,8 @@ class Game:
             self.state = GameState.THROW_IN
             self.state_timer = 0.5
             self.restart_team = 'away'
+            self.last_restart_type = 'throw_in'
+            self.throw_in_touched = False
             # Use last in-bounds position for x, clamp y inside field
             y_pos = 2.0 if self.last_ball_pos[1] < 50 else 98.0
             x_pos = float(np.clip(self.last_ball_pos[0], 5, 95))
