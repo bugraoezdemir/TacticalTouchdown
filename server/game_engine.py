@@ -794,14 +794,24 @@ class Player:
                     candidate_positions.append(target)
         
         # Also add direct teammate positions AND lead pass positions for moving teammates
+        # RUNWAY PASS POSITIONS: Add space-passes ahead of teammates for through balls
         for teammate in ctx.teammates:
             if teammate.role != 'GK' or ctx.dist_to_goal >= 50:
                 candidate_positions.append(teammate.pos.copy())
+                
                 # Add lead pass position if teammate is moving
                 if np.linalg.norm(teammate.vel) > 0.1:
                     lead_target = teammate.pos + teammate.vel * 5.0  # Lead by 5 time steps
                     if 2.0 < lead_target[0] < 98.0 and 2.0 < lead_target[1] < 98.0:
                         candidate_positions.append(lead_target)
+                
+                # RUNWAY PASSES: Add multiple positions ahead of teammate toward goal
+                # These are "through ball" targets where teammate can run onto the ball
+                goal_dir = normalize(ctx.goal_center - teammate.pos)
+                for runway_dist in [10.0, 15.0, 20.0, 25.0]:
+                    runway_target = teammate.pos + goal_dir * runway_dist
+                    if 5.0 < runway_target[0] < 95.0 and 5.0 < runway_target[1] < 95.0:
+                        candidate_positions.append(runway_target)
         
         # Evaluate each candidate position
         for target_pos in candidate_positions:
@@ -841,9 +851,46 @@ class Player:
                 continue  # Only skip if literally on top of target
             ball_time = pass_dist / BALL_PASS_SPEED
             
-            # Check if teammate can reach target before/when ball arrives
-            if best_reach_time > ball_time + 1.5:
-                continue  # Teammate can't reach in time
+            # RUNWAY PASS DETECTION: Check if this is a through ball (target ahead of teammate)
+            dist_teammate_to_target = np.linalg.norm(best_reach_teammate.pos - target_pos)
+            is_runway_candidate = dist_teammate_to_target > 5.0
+            
+            if is_runway_candidate:
+                # For runway passes, find the meeting point where ball and player can meet
+                # Solve for intercept point along ball trajectory
+                pass_dir = normalize(target_pos - self.pos)
+                
+                # Binary search for meeting point along ball trajectory
+                # Player runs from their position, ball runs from passer position
+                meeting_found = False
+                best_meeting_dist = 0.0
+                
+                # Test points along the ball trajectory
+                for test_dist in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]:
+                    if test_dist > pass_dist:
+                        break
+                    
+                    test_point = self.pos + pass_dir * test_dist
+                    
+                    # Time for ball to reach this point
+                    ball_time_to_point = test_dist / BALL_PASS_SPEED
+                    
+                    # Time for player to reach this point
+                    player_dist = np.linalg.norm(best_reach_teammate.pos - test_point)
+                    player_time_to_point = player_dist / PLAYER_SPRINT_SPEED
+                    
+                    # Player must arrive before or with ball (tolerance of 1.5 ticks)
+                    if player_time_to_point <= ball_time_to_point + 1.5:
+                        meeting_found = True
+                        best_meeting_dist = test_dist
+                        # Keep checking for better (further along) meeting points
+                
+                if not meeting_found:
+                    continue  # No valid meeting point found
+            else:
+                # Direct pass - teammate must reach target before ball arrives
+                if best_reach_time > ball_time + 1.5:
+                    continue  # Teammate can't reach in time
             
             # Check passing lane quality - allow more passes through
             lane_quality = calculate_passing_lane_quality(
@@ -916,6 +963,13 @@ class Player:
             # Bonus for very safe forward options
             if combined_safety > 0.5 and is_forward_pass:
                 score += SPACE_PASS_BONUS
+            
+            # RUNWAY PASS BONUS: Extra reward for passes into space ahead of teammate
+            # Check if target is ahead of the receiving teammate (runway pass)
+            dist_teammate_to_target = np.linalg.norm(best_reach_teammate.pos - target_pos)
+            is_runway_pass = dist_teammate_to_target > 6.0 and is_forward_pass
+            if is_runway_pass and safety_score > 0.5:
+                score += 0.15  # Bonus for through balls into space
             
             # DEFENSIVE ZONE PENALTY: Strongly penalize short passes near own goal
             if in_defensive_third:
