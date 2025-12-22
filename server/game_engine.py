@@ -402,6 +402,9 @@ class Player:
         
         # Dribble touch cooldown - prevents instant reacquisition after dribbling
         self.touch_cooldown_until = 0.0
+        
+        # Track who passed to this player (to avoid immediate return passes)
+        self.received_from_player_id: Optional[int] = None
     
     def to_dict(self):
         return {
@@ -498,7 +501,16 @@ class Player:
             min_opp_dist = min(min_opp_dist, float(d))
         
         # Dribbling allowed in attacking half (< 50 units from goal)
-        can_dribble = dist < 50.0
+        # OR for midfielders/wingers with empty space ahead (and not too far from goal)
+        is_mid_or_winger = self.role == 'MID' or (self.role == 'FWD' and self.lateral_role in ['left', 'right'])
+        goal_dir = ctx.goal_center - self.pos
+        goal_dir_norm = np.linalg.norm(goal_dir)
+        if goal_dir_norm > 0.1:
+            clearance_ahead = clearance_in_direction(self.pos, goal_dir / goal_dir_norm, ctx.opponent_positions)
+        else:
+            clearance_ahead = 0.0
+        has_space_ahead = clearance_ahead > 15.0 and dist < 70.0  # Must have good space and not too far back
+        can_dribble = dist < 50.0 or (is_mid_or_winger and has_space_ahead)
         
         # Check for hot teammate (someone with better shooting chance)
         hot_teammate, hot_opportunity = self._find_hot_teammate(ctx)
@@ -582,11 +594,14 @@ class Player:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
                 self._execute_dribble(ctx, game, dribble_dir)
-        # MIDFIELD/BUILD-UP: Pass-focused with runway option
+        # MIDFIELD/BUILD-UP: Pass-focused with runway option, but allow dribble with space
         else:
             if runway_score_adj > 0.28 * rand_factor and runway_target is not None and self.role in ['MID', 'FWD']:
                 # Execute through ball to start attack
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
+            elif is_mid_or_winger and has_space_ahead and dribble_score_adj > 0.25 * rand_factor and can_dribble:
+                # Midfielders/wingers can dribble forward into empty space
+                self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score_adj >= 0.08 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             elif min_opp_dist < 5.0 and pass_score < 0.1:
@@ -798,6 +813,10 @@ class Player:
                 elif pass_dist > 30.0 and goal_progress > 5.0:
                     score += 0.35  # Strong bonus for longer forward clearances
             
+            # AVOID RETURN PASS: Penalize passing back to who just passed to us
+            if self.received_from_player_id is not None and best_reach_teammate.id == self.received_from_player_id:
+                score -= 0.5  # Strong penalty for return pass
+            
             # Collect all viable options instead of just best
             if score > 0.1:  # Minimum viable score
                 # Add randomness to score for probabilistic selection
@@ -1002,7 +1021,9 @@ class Player:
 
     def _execute_pass(self, ctx, game, target_player, target_pos=None):
         """Execute a pass to target position (or teammate if no target specified)."""
+        passer_id = self.id  # Remember who is passing
         self.has_ball = False
+        self.received_from_player_id = None  # Clear on pass
         game.ball.owner_id = None
         
         # Use provided target position (for space passes) or teammate position
@@ -1013,6 +1034,7 @@ class Player:
         # Track pass target for recipient movement
         game.ball.target_player_id = target_player.id
         game.ball.target_pos = target_pos.copy() if isinstance(target_pos, np.ndarray) else np.array(target_pos)
+        game.ball.passer_id = passer_id  # Track who made this pass
         
         # ALWAYS pass toward the target - never redirect to goal
         pass_vec = target_pos - self.pos
@@ -1301,11 +1323,16 @@ class Player:
                 d = np.linalg.norm(opp_pos - game.ball.pos)
                 closest_opp_dist = min(float(closest_opp_dist), float(d))
             
+            # Check if I'm the absolute closest on my team
+            am_closest_on_team = closer_teammates == 0
+            
             # Decide whether to chase based on multiple factors
             should_chase = False
-            if my_dist < 15.0:  # Close enough - always run to the ball
+            if my_dist < 15.0:  # Very close - always run to the ball
                 should_chase = True
-            elif my_dist < 25.0 and closer_teammates == 0:  # Nearby and closest - chase
+            elif am_closest_on_team and my_dist < 35.0:  # Closest on team and within reasonable range
+                should_chase = True
+            elif am_closest_on_team and my_dist < closest_opp_dist:  # Closest and can beat opponent
                 should_chase = True
             elif self.role == 'DEF' and ball_in_defensive_half and my_dist < 35.0:
                 # DEFENDERS ARE AGGRESSIVE: Chase when ball enters their half
@@ -1313,9 +1340,7 @@ class Player:
             elif ball_near_own_goal and self.role == 'DEF' and my_dist < 25.0:
                 # Defenders MUST chase when ball is near own goal
                 should_chase = True
-            elif ball_in_zone and closer_teammates == 0:  # In our zone and we're closest teammate
-                should_chase = True
-            elif my_dist < closest_opp_dist and closer_teammates == 0:  # We can get there before opponent
+            elif ball_in_zone and am_closest_on_team:  # In our zone and closest
                 should_chase = True
             
             if should_chase:
@@ -2006,11 +2031,13 @@ class Ball:
         self.owner_id: Optional[int] = None
         self.target_player_id: Optional[int] = None  # Track intended pass recipient
         self.target_pos: Optional[np.ndarray] = None  # Track pass target position
+        self.passer_id: Optional[int] = None  # Track who made the current pass
 
     def clear_pass_target(self):
         """Clear pass target info when ball is controlled or goes out."""
         self.target_player_id = None
         self.target_pos = None
+        self.passer_id = None
 
     def to_dict(self):
         return {
@@ -2216,6 +2243,15 @@ class Game:
                 controller.has_ball = True
                 controller.touch_cooldown_until = 0.0  # Reset cooldown on ball acquisition
                 self.ball.owner_id = controller.id
+                
+                # Track who passed to this player (for avoiding return passes)
+                # Only track if this was a same-team pass (not interception/tackle)
+                is_same_team_pass = (previous_owner_team == controller.team) and self.ball.passer_id is not None
+                if is_same_team_pass:
+                    controller.received_from_player_id = self.ball.passer_id
+                else:
+                    controller.received_from_player_id = None  # Clear on interception/tackle
+                
                 self.ball.clear_pass_target()  # Clear pass tracking on control
                 self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
                 
