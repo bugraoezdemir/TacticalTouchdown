@@ -501,8 +501,8 @@ class Player:
             min_opp_dist = min(min_opp_dist, float(d))
         
         # Dribbling allowed in attacking half (< 50 units from goal)
-        # OR for midfielders/wingers with empty space ahead (and not too far from goal)
-        is_mid_or_winger = self.role == 'MID' or (self.role == 'FWD' and self.lateral_role in ['left', 'right'])
+        # OR for midfielders/forwards with empty space ahead (and not too far from goal)
+        is_attacking_player = self.role in ['MID', 'FWD']
         goal_dir = ctx.goal_center - self.pos
         goal_dir_norm = np.linalg.norm(goal_dir)
         if goal_dir_norm > 0.1:
@@ -510,7 +510,19 @@ class Player:
         else:
             clearance_ahead = 0.0
         has_space_ahead = clearance_ahead > 15.0 and dist < 70.0  # Must have good space and not too far back
-        can_dribble = dist < 50.0 or (is_mid_or_winger and has_space_ahead)
+        
+        # All attacking players can dribble when they have space
+        # But AVOID dribbling when no space is available (would run into opponents)
+        if is_attacking_player:
+            if has_space_ahead:
+                can_dribble = True
+            elif dist < 50.0 and clearance_ahead > 8.0:
+                # In attacking half with some space
+                can_dribble = True
+            else:
+                can_dribble = False  # No space - don't dribble into opponents
+        else:
+            can_dribble = dist < 50.0  # Defenders/GK use simple distance check
         
         # Check for hot teammate (someone with better shooting chance)
         hot_teammate, hot_opportunity = self._find_hot_teammate(ctx)
@@ -599,8 +611,8 @@ class Player:
             if runway_score_adj > 0.28 * rand_factor and runway_target is not None and self.role in ['MID', 'FWD']:
                 # Execute through ball to start attack
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
-            elif is_mid_or_winger and has_space_ahead and dribble_score_adj > 0.25 * rand_factor and can_dribble:
-                # Midfielders/wingers can dribble forward into empty space
+            elif is_attacking_player and has_space_ahead and dribble_score_adj > 0.25 * rand_factor and can_dribble:
+                # Midfielders/forwards can dribble forward into empty space
                 self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score_adj >= 0.08 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
