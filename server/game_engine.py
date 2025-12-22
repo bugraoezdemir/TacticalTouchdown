@@ -29,8 +29,8 @@ DECISION_RANDOMNESS = 0.15  # How much randomness in decisions (0-1)
 PASS_SELECTION_RANDOMNESS = 0.25  # Randomness in pass target selection
 
 # Decision weights - forward-focused passing
-PASS_SAFETY_WEIGHT = 0.35      # Reduced - balance with progress
-PASS_GOAL_PROGRESS_WEIGHT = 0.45 # Increased - prioritize forward movement
+PASS_SAFETY_WEIGHT = 0.50      # Increased - safety is paramount
+PASS_GOAL_PROGRESS_WEIGHT = 0.30 # Reduced - don't sacrifice safety for progress
 PASS_DISTANCE_WEIGHT = 0.2
 SPACE_PASS_BONUS = 0.15  # Re-enabled for space passes
 FORWARD_PASS_BONUS = 0.2  # Bonus for passes that significantly advance the ball
@@ -864,6 +864,7 @@ class Player:
                 # Player runs from their position, ball runs from passer position
                 meeting_found = False
                 best_meeting_dist = 0.0
+                meeting_point = None
                 
                 # Test points along the ball trajectory
                 for test_dist in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]:
@@ -883,10 +884,25 @@ class Player:
                     if player_time_to_point <= ball_time_to_point + 1.5:
                         meeting_found = True
                         best_meeting_dist = test_dist
+                        meeting_point = test_point.copy()
                         # Keep checking for better (further along) meeting points
                 
                 if not meeting_found:
                     continue  # No valid meeting point found
+                
+                # CRITICAL: Use meeting point as the actual target for runway passes
+                # This ensures scoring evaluates the intercept, not the far waypoint
+                target_pos = meeting_point
+                pass_dist = np.linalg.norm(target_pos - self.pos)
+                ball_time = pass_dist / BALL_PASS_SPEED
+                best_reach_time = np.linalg.norm(best_reach_teammate.pos - target_pos) / PLAYER_SPRINT_SPEED
+                
+                # Recompute vision penalty for the updated target position
+                in_vision, vision_dist, vision_angle = is_in_vision_cone(
+                    self.pos, ctx.facing, target_pos)
+                vision_penalty = 0.0
+                if not in_vision and vision_angle > 90:
+                    vision_penalty = 0.3
             else:
                 # Direct pass - teammate must reach target before ball arrives
                 if best_reach_time > ball_time + 1.5:
@@ -913,9 +929,9 @@ class Player:
                 margin = time_opp_at_point - time_ball_at_point
                 min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            # Skip only if opponent can intercept (margin < 0 means opponent arrives first)
-            if min_intercept_margin < -0.5:
-                continue
+            # STRICTER: Skip if opponent can intercept (require positive margin for safety)
+            if min_intercept_margin < 0.3:
+                continue  # Reject passes where opponent arrives close to ball time
             
             # Score components - higher margin = safer (margin > 0 means ball arrives first)
             safety_score = min(1.0, max(0.0, (min_intercept_margin + 1.0) / 3.0))
@@ -964,12 +980,10 @@ class Player:
             if combined_safety > 0.5 and is_forward_pass:
                 score += SPACE_PASS_BONUS
             
-            # RUNWAY PASS BONUS: Extra reward for passes into space ahead of teammate
-            # Check if target is ahead of the receiving teammate (runway pass)
-            dist_teammate_to_target = np.linalg.norm(best_reach_teammate.pos - target_pos)
-            is_runway_pass = dist_teammate_to_target > 6.0 and is_forward_pass
-            if is_runway_pass and safety_score > 0.5:
-                score += 0.15  # Bonus for through balls into space
+            # RUNWAY PASS BONUS: Strong reward for through balls into space
+            # is_runway_candidate was set earlier - boost score for successful runway passes
+            if is_runway_candidate and safety_score > 0.4 and is_forward_pass:
+                score += 0.25  # Strong bonus for through balls into space
             
             # DEFENSIVE ZONE PENALTY: Strongly penalize short passes near own goal
             if in_defensive_third:
