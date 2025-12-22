@@ -1647,6 +1647,43 @@ class Player:
                     ball_owner = p
                     break
         
+        # ATTACK SUPPORT MODE: MID and FWD push forward when teammate is dribbling
+        # This MUST be checked BEFORE loose ball chase to prevent teammates from chasing the dribbler's ball
+        attack_support_active = (game.attack_support_team == self.team)
+        if attack_support_active and self.role in ['MID', 'FWD']:
+            # Don't make support run if I'm the dribbler (very close to ball)
+            my_dist_to_ball = np.linalg.norm(game.ball.pos - self.pos)
+            if my_dist_to_ball > 8.0:  # Not the dribbler
+                # Push forward to support the attack - WIDE runs for wingers
+                if self.team == 'home':
+                    # Calculate forward target based on ball position
+                    target_x = min(game.ball.pos[0] + 15.0, 92.0)
+                else:
+                    target_x = max(game.ball.pos[0] - 15.0, 8.0)
+                
+                # WIDE positions for wingers - use touchline corridors
+                if self.lateral_role == 'left':
+                    target_y = 12.0 + random.uniform(-3, 3)  # Near top touchline
+                elif self.lateral_role == 'right':
+                    target_y = 88.0 + random.uniform(-3, 3)  # Near bottom touchline
+                elif self.lateral_role == 'center_left':
+                    target_y = 30.0 + random.uniform(-5, 5)  # Left half-space
+                elif self.lateral_role == 'center_right':
+                    target_y = 70.0 + random.uniform(-5, 5)  # Right half-space
+                else:
+                    target_y = 50.0 + random.uniform(-8, 8)  # Central
+                
+                support_target = np.array([target_x, target_y])
+                
+                # Sprint to support position
+                to_target = support_target - self.pos
+                dist = np.linalg.norm(to_target)
+                if dist > 3.0:
+                    self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
+                else:
+                    self.vel = np.zeros(2)
+                return  # Skip normal loose ball chase
+        
         # When ball is loose, determine if we should chase or hold position
         if ball_owner is None:
             to_ball = game.ball.pos - self.pos
@@ -1749,44 +1786,6 @@ class Player:
             team_has_possession = (ball_owner.team == self.team)
         elif game.last_touch is not None:
             team_has_possession = (game.last_touch.team == self.team)
-        
-        # ATTACK SUPPORT MODE: When teammate is dribbling, MID and FWD push forward aggressively
-        attack_support_active = (game.attack_support_team == self.team)
-        if attack_support_active and self.role in ['MID', 'FWD']:
-            # Push forward to support the attack - find advanced position
-            goal_center = np.array([100.0, 50.0]) if self.team == 'home' else np.array([0.0, 50.0])
-            
-            # Calculate forward push target - ahead of current position toward goal
-            to_goal = normalize(goal_center - self.pos)
-            
-            # Push distance depends on current position - further forward = less push needed
-            if self.team == 'home':
-                current_progress = self.pos[0] / 100.0
-                push_dist = 15.0 * (1.0 - current_progress)  # More push when further back
-                target_x = min(self.pos[0] + push_dist, 90.0)  # Don't go past box
-            else:
-                current_progress = (100.0 - self.pos[0]) / 100.0
-                push_dist = 15.0 * (1.0 - current_progress)
-                target_x = max(self.pos[0] - push_dist, 10.0)
-            
-            # Spread laterally based on lateral role
-            if self.lateral_role == 'left':
-                target_y = 25.0 + random.uniform(-5, 5)
-            elif self.lateral_role == 'right':
-                target_y = 75.0 + random.uniform(-5, 5)
-            else:
-                target_y = 50.0 + random.uniform(-10, 10)
-            
-            support_target = np.array([target_x, target_y])
-            
-            # Sprint to support position
-            to_target = support_target - self.pos
-            dist = np.linalg.norm(to_target)
-            if dist > 3.0:
-                self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
-            else:
-                self.vel = np.zeros(2)
-            return
         
         if team_has_possession:
             # Determine if player should make forward runs
