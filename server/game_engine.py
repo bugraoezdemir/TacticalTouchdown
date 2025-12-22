@@ -18,7 +18,7 @@ PLAYER_SPRINT_SPEED = 0.7
 GK_SPEED = 0.6  # Goalkeepers move at 2/3 speed
 GK_SPRINT_SPEED = 0.8  # GK sprint at 2/3 speed
 GK_DIVE_REACH = 10.0  # How far GK can dive to save
-BALL_PASS_SPEED = 2.0
+BALL_PASS_SPEED = 2.8  # Faster passes for quicker play
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.0
@@ -513,7 +513,12 @@ class Player:
         
         # All attacking players can dribble when they have space
         # But AVOID dribbling when no space is available (would run into opponents)
-        if is_attacking_player:
+        # Also avoid dribbling when opponents are too close - pass instead!
+        under_pressure = min_opp_dist < 8.0  # Opponent within 8 units = under pressure
+        
+        if under_pressure:
+            can_dribble = False  # Under pressure - must pass, don't dribble
+        elif is_attacking_player:
             if has_space_ahead:
                 can_dribble = True
             elif dist < 50.0 and clearance_ahead > 8.0:
