@@ -410,6 +410,9 @@ class Player:
         self.is_dribbling = False
         self.dribble_touches = 0  # Count touches in current dribble sequence
         self.last_dribble_dir = None  # Last dribble direction for continuity
+        
+        # Pass intercept target - where to run to receive a pass
+        self.pass_intercept_target = None
     
     def to_dict(self):
         return {
@@ -491,9 +494,17 @@ class Player:
                 self._execute_pass(ctx, game, pass_option, pass_target)
                 return
             
-            # 3. CHANGE DIRECTION if current path is bad but new path is better
-            if self.last_dribble_dir is not None and current_clearance < 12.0 and new_clearance > current_clearance + 2.0:
-                # Better direction found - take it
+            # 3. CHANGE DIRECTION if new path is meaningfully better (more lenient)
+            should_change_direction = False
+            if self.last_dribble_dir is not None:
+                # Change if current path is blocked and new path is any better
+                if current_clearance < 10.0 and new_clearance > current_clearance + 1.5:
+                    should_change_direction = True
+                # Also change if new direction is significantly better overall
+                elif new_clearance > current_clearance * 1.3 and new_clearance > 8.0:
+                    should_change_direction = True
+            
+            if should_change_direction:
                 self._execute_dribble(ctx, game, new_dribble_dir)
                 return
             
@@ -1079,10 +1090,12 @@ class Player:
                 else:
                     avoidance_bonus = avoidance_alignment * 0.6  # Stronger penalty for moving into pressure
             
-            if ctx.team == 'home' and direction[0] < -0.5:
-                goal_factor *= 0.3
-            elif ctx.team == 'away' and direction[0] > 0.5:
-                goal_factor *= 0.3
+            # STRONG BACKWARD PENALTY: Heavily penalize dribbling away from goal
+            backward_penalty = 0.0
+            if ctx.team == 'home' and direction[0] < -0.3:
+                backward_penalty = 0.5 * abs(direction[0])  # Stronger penalty for more backward
+            elif ctx.team == 'away' and direction[0] > 0.3:
+                backward_penalty = 0.5 * abs(direction[0])
             
             future_pos = self.pos + direction * 10
             if future_pos[1] < 10 or future_pos[1] > 90:
@@ -1091,7 +1104,8 @@ class Player:
             score = (
                 DRIBBLE_CLEARANCE_WEIGHT * clearance_factor +
                 DRIBBLE_GOAL_PROGRESS_WEIGHT * goal_factor +
-                avoidance_bonus
+                avoidance_bonus -
+                backward_penalty
             )
             
             if score > best_score:
@@ -1231,6 +1245,9 @@ class Player:
         game.ball.target_pos = target_pos.copy() if isinstance(target_pos, np.ndarray) else np.array(target_pos)
         game.ball.passer_id = passer_id  # Track who made this pass
         
+        # SIGNAL PASS: Immediately notify target player to start moving toward ball trajectory
+        self._signal_pass_to_target(game, target_player, target_pos, self.pos)
+        
         # ALWAYS pass toward the target - never redirect to goal
         pass_vec = target_pos - self.pos
         pass_dist = np.linalg.norm(pass_vec)
@@ -1250,6 +1267,47 @@ class Player:
         
         # Track last touch
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
+    
+    def _signal_pass_to_target(self, game, target_player, target_pos, passer_pos):
+        """Signal pass recipient to immediately start moving toward ball trajectory.
+        
+        This calculates the optimal intercept point along the ball path and sets
+        the target player's velocity to sprint toward it.
+        """
+        # Calculate ball trajectory
+        ball_dir = normalize(target_pos - passer_pos)
+        ball_speed = BALL_PASS_SPEED
+        
+        # Calculate intercept point - where should the receiver run to?
+        # Project receiver position onto ball trajectory to find closest point
+        to_receiver = target_player.pos - passer_pos
+        proj_length = float(np.dot(to_receiver, ball_dir))
+        closest_on_path = passer_pos + ball_dir * max(0, proj_length)
+        
+        # Calculate a point slightly ahead of closest_on_path (lead the intercept)
+        # Time for ball to reach closest point
+        dist_to_closest = np.linalg.norm(closest_on_path - passer_pos)
+        ball_time = dist_to_closest / ball_speed
+        
+        # Where can receiver get to in that time?
+        receiver_reach = PLAYER_SPRINT_SPEED * ball_time
+        dist_receiver_to_intercept = np.linalg.norm(closest_on_path - target_player.pos)
+        
+        # If receiver can make it, sprint toward intercept point
+        if dist_receiver_to_intercept < receiver_reach + 5.0:  # Some tolerance
+            intercept_target = closest_on_path
+        else:
+            # Meet the ball further along its path
+            # Estimate where paths cross
+            intercept_target = target_pos  # Default to target position
+        
+        # Set receiver velocity toward intercept point
+        if np.linalg.norm(intercept_target - target_player.pos) > 1.0:
+            run_dir = normalize(intercept_target - target_player.pos)
+            target_player.vel = run_dir * PLAYER_SPRINT_SPEED
+            
+            # Store the intercept target for continued movement
+            target_player.pass_intercept_target = intercept_target.copy()
 
     def _execute_dribble(self, ctx, game, direction):
         """Execute dribbling as short kicks - ball is released ahead, player chases it."""
@@ -1443,13 +1501,26 @@ class Player:
             return
         
         # PASS RECIPIENT MOVEMENT: When pass is in flight, move TOWARD ball trajectory to receive
-        # ONLY activate if there's an actual pass target (not dribble or shot)
+        # PRIORITY: Use pre-calculated intercept target from _signal_pass_to_target if available
         ball_speed = np.linalg.norm(game.ball.vel)
         has_pass_target = game.ball.target_player_id is not None
-        if ball_speed > 0.5 and game.ball.owner_id is None and has_pass_target:
-            # Check if I am the intended recipient OR near the ball's path
-            am_target = game.ball.target_player_id == self.id
+        
+        # Check if I am the intended recipient with a pre-calculated intercept point
+        am_target = game.ball.target_player_id == self.id
+        if am_target and self.pass_intercept_target is not None and ball_speed > 0.3:
+            # Sprint toward pre-calculated intercept point
+            to_intercept = self.pass_intercept_target - self.pos
+            dist_to_intercept = np.linalg.norm(to_intercept)
             
+            if dist_to_intercept > 1.0:
+                self.vel = normalize(to_intercept) * PLAYER_SPRINT_SPEED
+                return
+            else:
+                # Close enough - slow down and prepare to receive
+                self.pass_intercept_target = None  # Clear after reaching
+        
+        # Fallback: Dynamic intercept calculation for any player near ball path
+        if ball_speed > 0.5 and game.ball.owner_id is None and has_pass_target:
             # Check if I'm near the ball trajectory
             if ball_speed > 0.1:
                 ball_dir = normalize(game.ball.vel)
@@ -1471,23 +1542,8 @@ class Player:
                     if np.linalg.norm(ball_intercept - game.ball.pos) > 40.0:
                         ball_intercept = game.ball.pos + ball_dir * 40.0
                     
-                    # Move toward intercept point, with slight perpendicular offset for space
-                    perp = np.array([-ball_dir[1], ball_dir[0]])
-                    
-                    # Choose perpendicular side with more space
-                    best_offset = 0.0
-                    if len(ctx.opponent_positions) > 0:
-                        for sign in [1.0, -1.0]:
-                            test_pos = closest_on_path + perp * sign * 3.0
-                            nearest_opp_dist = float(min(
-                                float(np.linalg.norm(test_pos - opp_pos))
-                                for opp_pos in ctx.opponent_positions
-                            ))
-                            if abs(best_offset) < 0.1 or nearest_opp_dist > abs(best_offset):
-                                best_offset = sign * 2.0  # Small offset for receiving angle
-                    
-                    # Target is on the ball path with small perpendicular offset
-                    move_target = closest_on_path + perp * best_offset
+                    # Move toward intercept point
+                    move_target = ball_intercept
                     move_target = self._clamp_to_zone(move_target)
                     
                     to_target = move_target - self.pos
@@ -2462,6 +2518,10 @@ class Game:
                 
                 self.ball.clear_pass_target()  # Clear pass tracking on control
                 self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
+                
+                # Clear pass intercept targets for all players
+                for p in self.players:
+                    p.pass_intercept_target = None
                 
                 # Mark throw-in as touched (for goal prevention rule)
                 if self.last_restart_type == 'throw_in':
