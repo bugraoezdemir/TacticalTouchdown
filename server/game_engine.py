@@ -237,21 +237,34 @@ def is_in_vision_cone(observer_pos, observer_facing, target_pos,
 
 def calculate_passing_lane_quality(passer_pos, target_pos, opponents):
     """Calculate quality of passing lane - 0 (blocked) to 1 (clear)."""
-    corridor_width = 3.0
-    blocking_opponents = 0
+    # WIDER corridor - scale with pass distance for better blocking detection
+    pass_dist = np.linalg.norm(target_pos - passer_pos)
+    base_corridor = 4.0  # Increased from 3.0
+    # Longer passes need wider corridor since opponents have more time to react
+    corridor_width = base_corridor + pass_dist * 0.08  # e.g., 20m pass = 5.6 corridor
+    
+    blocking_score = 0.0
     
     for opp_pos in opponents:
         dist_to_line = distance_point_to_segment(opp_pos, passer_pos, target_pos)
         to_opp = opp_pos - passer_pos
         pass_vec = target_pos - passer_pos
-        proj = np.dot(to_opp, pass_vec) / max(np.linalg.norm(pass_vec), 1e-6)
+        pass_len = np.linalg.norm(pass_vec)
+        proj = np.dot(to_opp, pass_vec) / max(pass_len, 1e-6)
         
-        if 0 < proj < np.linalg.norm(pass_vec) and dist_to_line < corridor_width:
-            blocking_opponents += 1
+        # Check if opponent is along the pass path
+        if 0 < proj < pass_len and dist_to_line < corridor_width:
+            # Weight by how close to lane center - closer = more blocking
+            blocking_weight = 1.0 - (dist_to_line / corridor_width)
+            # Also weight by position along path - middle is most dangerous
+            path_position = proj / pass_len
+            position_weight = 1.0 - 2 * abs(path_position - 0.5)  # Peak at middle
+            blocking_score += blocking_weight * (0.5 + 0.5 * position_weight)
     
-    if blocking_opponents == 0:
+    if blocking_score < 0.1:
         return 1.0
-    return max(0.0, 1.0 / (1.0 + blocking_opponents * 0.5))
+    # Stronger penalty for blocking opponents
+    return max(0.0, 1.0 / (1.0 + blocking_score * 1.5))
 
 def project_point_to_segment(point, seg_start, seg_end):
     """Project a point onto a line segment, return closest point on segment."""
@@ -919,19 +932,22 @@ class Player:
             min_intercept_margin = float('inf')
             for opp_pos in ctx.opponent_positions:
                 closest_on_path = project_point_to_segment(opp_pos, self.pos, target_pos)
-                dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
+                
+                # FULL EUCLIDEAN DISTANCE: Opponent must travel from their position to intercept point
+                # This includes both perpendicular distance AND any along-path component
+                opp_dist_to_intercept = np.linalg.norm(opp_pos - closest_on_path)
                 dist_along_path = np.linalg.norm(closest_on_path - self.pos)
                 
                 time_ball_at_point = dist_along_path / BALL_PASS_SPEED
-                time_opp_at_point = dist_to_path / PLAYER_SPRINT_SPEED
+                time_opp_at_point = opp_dist_to_intercept / PLAYER_SPRINT_SPEED
                 
-                # FIX: margin = opponent_time - ball_time (positive means ball arrives first = SAFE)
+                # margin = opponent_time - ball_time (positive means ball arrives first = SAFE)
                 margin = time_opp_at_point - time_ball_at_point
                 min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            # STRICTER: Skip if opponent can intercept (require positive margin for safety)
-            if min_intercept_margin < 0.3:
-                continue  # Reject passes where opponent arrives close to ball time
+            # MUCH STRICTER: Require substantial positive margin (0.5 = ~1.25s lead)
+            if min_intercept_margin < 0.5:
+                continue  # Reject passes where opponent can get close to ball
             
             # Score components - higher margin = safer (margin > 0 means ball arrives first)
             safety_score = min(1.0, max(0.0, (min_intercept_margin + 1.0) / 3.0))
@@ -1231,16 +1247,17 @@ class Player:
             min_intercept_margin = float('inf')
             for opp_pos in ctx.opponent_positions:
                 closest_on_path = project_point_to_segment(opp_pos, self.pos, teammate.pos)
-                dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
+                # FULL distance from opponent to intercept point
+                opp_dist_to_intercept = np.linalg.norm(opp_pos - closest_on_path)
                 dist_along_path = np.linalg.norm(closest_on_path - self.pos)
                 
                 time_ball_at_point = dist_along_path / BALL_PASS_SPEED
-                time_opp_at_point = dist_to_path / PLAYER_SPRINT_SPEED
+                time_opp_at_point = opp_dist_to_intercept / PLAYER_SPRINT_SPEED
                 margin = time_opp_at_point - time_ball_at_point
                 min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            if min_intercept_margin < 0.3:
-                continue  # High interception risk
+            if min_intercept_margin < 0.5:
+                continue  # High interception risk - require safe margin
             
             # Score the pass
             safety_score = min(1.0, max(0.0, min_intercept_margin / 2.0))
