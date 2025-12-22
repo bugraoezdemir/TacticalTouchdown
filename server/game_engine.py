@@ -21,7 +21,7 @@ GK_DIVE_REACH = 10.0  # How far GK can dive to save
 BALL_PASS_SPEED = 2.8  # Faster passes for quicker play
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
-TACKLE_DISTANCE = 2.0
+TACKLE_DISTANCE = 3.5  # Increased to catch fast-moving balls (ball speed 2.8/tick)
 BALL_FRICTION = 0.95
 
 # Probabilistic decision parameters
@@ -491,8 +491,8 @@ class Player:
                 self._execute_pass(ctx, game, pass_option, pass_target)
                 return
             
-            # 3. CHANGE DIRECTION if current path is bad but new path is significantly better
-            if self.last_dribble_dir is not None and current_clearance < 10.0 and new_clearance > current_clearance + 5.0:
+            # 3. CHANGE DIRECTION if current path is bad but new path is better
+            if self.last_dribble_dir is not None and current_clearance < 12.0 and new_clearance > current_clearance + 2.0:
                 # Better direction found - take it
                 self._execute_dribble(ctx, game, new_dribble_dir)
                 return
