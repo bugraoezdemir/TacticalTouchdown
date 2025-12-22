@@ -1410,6 +1410,9 @@ class Player:
         self.dribble_touches += 1
         self.last_dribble_dir = direction.copy()  # Track direction for trajectory checking
         
+        # ATTACK SUPPORT MODE: Activate when player dribbles - teammates push forward
+        game.attack_support_team = self.team
+        
         # Kick ball ahead by DRIBBLE_TOUCH_DISTANCE in the movement direction
         kick_distance = DRIBBLE_TOUCH_DISTANCE
         game.ball.pos = self.pos + direction * kick_distance
@@ -1746,6 +1749,44 @@ class Player:
             team_has_possession = (ball_owner.team == self.team)
         elif game.last_touch is not None:
             team_has_possession = (game.last_touch.team == self.team)
+        
+        # ATTACK SUPPORT MODE: When teammate is dribbling, MID and FWD push forward aggressively
+        attack_support_active = (game.attack_support_team == self.team)
+        if attack_support_active and self.role in ['MID', 'FWD']:
+            # Push forward to support the attack - find advanced position
+            goal_center = np.array([100.0, 50.0]) if self.team == 'home' else np.array([0.0, 50.0])
+            
+            # Calculate forward push target - ahead of current position toward goal
+            to_goal = normalize(goal_center - self.pos)
+            
+            # Push distance depends on current position - further forward = less push needed
+            if self.team == 'home':
+                current_progress = self.pos[0] / 100.0
+                push_dist = 15.0 * (1.0 - current_progress)  # More push when further back
+                target_x = min(self.pos[0] + push_dist, 90.0)  # Don't go past box
+            else:
+                current_progress = (100.0 - self.pos[0]) / 100.0
+                push_dist = 15.0 * (1.0 - current_progress)
+                target_x = max(self.pos[0] - push_dist, 10.0)
+            
+            # Spread laterally based on lateral role
+            if self.lateral_role == 'left':
+                target_y = 25.0 + random.uniform(-5, 5)
+            elif self.lateral_role == 'right':
+                target_y = 75.0 + random.uniform(-5, 5)
+            else:
+                target_y = 50.0 + random.uniform(-10, 10)
+            
+            support_target = np.array([target_x, target_y])
+            
+            # Sprint to support position
+            to_target = support_target - self.pos
+            dist = np.linalg.norm(to_target)
+            if dist > 3.0:
+                self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
+            else:
+                self.vel = np.zeros(2)
+            return
         
         if team_has_possession:
             # Determine if player should make forward runs
@@ -2411,6 +2452,9 @@ class Game:
         self.last_restart_type = None  # Track last restart type (for throw-in goal prevention)
         self.throw_in_touched = False  # Has ball been touched after throw-in?
         
+        # ATTACK SUPPORT MODE: When a player dribbles, teammates push forward
+        self.attack_support_team = None  # Team with active dribble ('home' or 'away')
+        
         # Tactical settings for home team (user controlled)
         self.home_formation = '4-4-2'
         self.home_mentality = 'normal'
@@ -2614,6 +2658,11 @@ class Game:
                 
                 # TACKLE STALL: The player who lost the ball gets a stall cooldown
                 is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
+                
+                # CLEAR ATTACK SUPPORT: When opponent touches ball, attack support ends
+                if is_tackle or (self.attack_support_team and controller.team != self.attack_support_team):
+                    self.attack_support_team = None
+                
                 if is_tackle and previous_owner_id is not None:
                     # Find the player who lost the ball and stall them
                     for p in self.players:
