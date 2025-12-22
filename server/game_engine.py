@@ -1303,7 +1303,9 @@ class Player:
             
             # Decide whether to chase based on multiple factors
             should_chase = False
-            if my_dist < 8.0:  # Very close - always chase
+            if my_dist < 15.0:  # Close enough - always run to the ball
+                should_chase = True
+            elif my_dist < 25.0 and closer_teammates == 0:  # Nearby and closest - chase
                 should_chase = True
             elif self.role == 'DEF' and ball_in_defensive_half and my_dist < 35.0:
                 # DEFENDERS ARE AGGRESSIVE: Chase when ball enters their half
