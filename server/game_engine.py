@@ -409,6 +409,7 @@ class Player:
         # Track if player is currently in a dribble sequence (for re-evaluation)
         self.is_dribbling = False
         self.dribble_touches = 0  # Count touches in current dribble sequence
+        self.last_dribble_dir = None  # Last dribble direction for continuity
     
     def to_dict(self):
         return {
@@ -441,42 +442,85 @@ class Player:
     def _make_ball_decision(self, ctx, game):
         """Decision making when player has the ball."""
         
-        # DRIBBLE RE-EVALUATION: After each dribble touch, aggressively check for shot/pass
+        # DRIBBLE RE-EVALUATION: Smart decision making during dribble sequence
         if self.is_dribbling and self.dribble_touches > 0:
-            # Re-evaluate shots and passes with lower thresholds
+            # Evaluate current situation
             shoot_score = self._evaluate_shoot(ctx)
-            pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
+            pass_option, pass_target, pass_score = self._evaluate_pass_while_dribbling(ctx)
+            new_dribble_dir, dribble_score = self._evaluate_dribble(ctx)
             
             # Apply tactical multipliers
             if self.team == 'home':
                 shoot_score *= game.home_shoot_frequency
+                dribble_score *= game.home_dribble_frequency
             
-            # Lower thresholds when dribbling - be more willing to shoot/pass
-            # After 2+ touches, strongly prefer shooting or passing
-            shoot_threshold = 0.08 if self.dribble_touches >= 2 else 0.12
-            pass_threshold = 0.12 if self.dribble_touches >= 2 else 0.18
+            # Calculate clearance for the NEW direction (always available)
+            new_clearance = clearance_in_direction(self.pos, new_dribble_dir, ctx.opponent_positions)
             
-            # Take the shot if any reasonable opportunity
-            if shoot_score > shoot_threshold and ctx.dist_to_goal < 35.0:
+            # Check current trajectory clearance (use new direction if no last direction)
+            if self.last_dribble_dir is not None:
+                current_clearance = clearance_in_direction(self.pos, self.last_dribble_dir, ctx.opponent_positions)
+            else:
+                current_clearance = new_clearance  # First touch - use new direction
+            
+            # Pressure check - how close is nearest opponent?
+            min_opp_dist = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                d = np.linalg.norm(opp_pos - self.pos)
+                min_opp_dist = min(min_opp_dist, float(d))
+            
+            # DECISION PRIORITY during dribble:
+            # 1. SHOOT if good opportunity (lower threshold when dribbling)
+            if shoot_score > 0.10 and ctx.dist_to_goal < 30.0:
                 self._clear_dribble_state()
                 self._execute_shoot(ctx, game)
                 return
             
-            # Pass if good option found
-            if pass_score > pass_threshold and pass_option is not None:
+            # 2. PASS if good target found AND (under pressure OR trajectory blocked OR 2+ touches)
+            should_pass = False
+            if pass_option is not None and pass_score > 0.15:
+                if min_opp_dist < 10.0:  # Under pressure
+                    should_pass = True
+                elif current_clearance < 8.0 and new_clearance < 10.0:  # No good path
+                    should_pass = True
+                elif self.dribble_touches >= 2:  # Don't hog the ball
+                    should_pass = True
+            
+            if should_pass:
                 self._clear_dribble_state()
                 self._execute_pass(ctx, game, pass_option, pass_target)
                 return
             
-            # After 3+ touches, force a decision - no more dribbling
+            # 3. CHANGE DIRECTION if current path is bad but new path is significantly better
+            if self.last_dribble_dir is not None and current_clearance < 10.0 and new_clearance > current_clearance + 5.0:
+                # Better direction found - take it
+                self._execute_dribble(ctx, game, new_dribble_dir)
+                return
+            
+            # 4. FORCE RELEASE after 3 touches - no more dribbling
             if self.dribble_touches >= 3:
                 self._clear_dribble_state()
-                if shoot_score > 0.05 and ctx.dist_to_goal < 40.0:
-                    self._execute_shoot(ctx, game)
-                elif pass_option is not None:
+                if pass_option is not None:
                     self._execute_pass(ctx, game, pass_option, pass_target)
+                elif shoot_score > 0.05 and ctx.dist_to_goal < 40.0:
+                    self._execute_shoot(ctx, game)
                 else:
                     self._execute_clearance(ctx, game)
+                return
+            
+            # 5. CONTINUE DRIBBLING if good path available (use new_clearance for first touch)
+            if dribble_score > 0.3 and new_clearance > 8.0:
+                self._execute_dribble(ctx, game, new_dribble_dir)
+                return
+            
+            # 6. FALLBACK: pass or shoot
+            if pass_option is not None:
+                self._clear_dribble_state()
+                self._execute_pass(ctx, game, pass_option, pass_target)
+                return
+            elif shoot_score > 0.05:
+                self._clear_dribble_state()
+                self._execute_shoot(ctx, game)
                 return
         
         # GK behavior: pass when safe, throw to corner when under pressure
@@ -1060,6 +1104,91 @@ class Player:
         """Clear dribble sequence tracking."""
         self.is_dribbling = False
         self.dribble_touches = 0
+        self.last_dribble_dir = None
+    
+    def _evaluate_pass_while_dribbling(self, ctx):
+        """Evaluate pass options while dribbling - stricter criteria for good passes only."""
+        best_teammate = None
+        best_target = None
+        best_score = 0.0
+        
+        for teammate in ctx.teammates:
+            if teammate.role == 'GK' and ctx.dist_to_goal < 60:
+                continue  # Don't pass to GK when attacking
+            
+            # Skip teammates behind us (backward passes during dribble are usually bad)
+            to_teammate = teammate.pos - self.pos
+            to_goal = ctx.goal_center - self.pos
+            
+            # Check if pass is generally forward
+            is_forward = np.dot(to_teammate, to_goal) > 0
+            
+            # Calculate pass distance
+            pass_dist = np.linalg.norm(to_teammate)
+            if pass_dist < 5.0 or pass_dist > 40.0:
+                continue  # Too close or too far
+            
+            # Check receiver pressure - is teammate marked?
+            receiver_pressure = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                d = np.linalg.norm(opp_pos - teammate.pos)
+                receiver_pressure = min(receiver_pressure, float(d))
+            
+            if receiver_pressure < 5.0:
+                continue  # Teammate is heavily marked
+            
+            # Check passing lane quality
+            lane_quality = calculate_passing_lane_quality(
+                self.pos, teammate.pos, ctx.opponent_positions)
+            
+            if lane_quality < 0.4:
+                continue  # Lane is blocked
+            
+            # Calculate time margins for interception
+            ball_time = pass_dist / BALL_PASS_SPEED
+            min_intercept_margin = float('inf')
+            for opp_pos in ctx.opponent_positions:
+                closest_on_path = project_point_to_segment(opp_pos, self.pos, teammate.pos)
+                dist_to_path = np.linalg.norm(opp_pos - closest_on_path)
+                dist_along_path = np.linalg.norm(closest_on_path - self.pos)
+                
+                time_ball_at_point = dist_along_path / BALL_PASS_SPEED
+                time_opp_at_point = dist_to_path / PLAYER_SPRINT_SPEED
+                margin = time_opp_at_point - time_ball_at_point
+                min_intercept_margin = min(min_intercept_margin, float(margin))
+            
+            if min_intercept_margin < 0.3:
+                continue  # High interception risk
+            
+            # Score the pass
+            safety_score = min(1.0, max(0.0, min_intercept_margin / 2.0))
+            space_score = min(1.0, receiver_pressure / 15.0)
+            forward_bonus = 0.2 if is_forward else 0.0
+            
+            # Goal progress
+            my_goal_dist = ctx.dist_to_goal
+            teammate_goal_dist = distance_to_goal(teammate.pos, ctx.team)
+            progress_score = (my_goal_dist - teammate_goal_dist) / 50.0 if teammate_goal_dist < my_goal_dist else 0.0
+            
+            score = (
+                0.3 * safety_score +
+                0.25 * space_score +
+                0.25 * lane_quality +
+                0.2 * progress_score +
+                forward_bonus
+            )
+            
+            # Avoid return passes
+            if self.received_from_player_id is not None and teammate.id == self.received_from_player_id:
+                score -= 0.3
+            
+            if score > best_score:
+                best_score = score
+                best_teammate = teammate
+                # Lead the pass slightly
+                best_target = teammate.pos + teammate.vel * 2.0
+        
+        return best_teammate, best_target, best_score
 
     def _execute_shoot(self, ctx, game):
         """Execute a shot on goal - target corners away from goalkeeper."""
@@ -1136,6 +1265,7 @@ class Player:
         # Mark as dribbling for re-evaluation on next touch
         self.is_dribbling = True
         self.dribble_touches += 1
+        self.last_dribble_dir = direction.copy()  # Track direction for trajectory checking
         
         # Kick ball ahead by DRIBBLE_TOUCH_DISTANCE in the movement direction
         kick_distance = DRIBBLE_TOUCH_DISTANCE
