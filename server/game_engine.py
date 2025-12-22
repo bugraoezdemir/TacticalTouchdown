@@ -405,6 +405,10 @@ class Player:
         
         # Track who passed to this player (to avoid immediate return passes)
         self.received_from_player_id: Optional[int] = None
+        
+        # Track if player is currently in a dribble sequence (for re-evaluation)
+        self.is_dribbling = False
+        self.dribble_touches = 0  # Count touches in current dribble sequence
     
     def to_dict(self):
         return {
@@ -436,6 +440,44 @@ class Player:
 
     def _make_ball_decision(self, ctx, game):
         """Decision making when player has the ball."""
+        
+        # DRIBBLE RE-EVALUATION: After each dribble touch, aggressively check for shot/pass
+        if self.is_dribbling and self.dribble_touches > 0:
+            # Re-evaluate shots and passes with lower thresholds
+            shoot_score = self._evaluate_shoot(ctx)
+            pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
+            
+            # Apply tactical multipliers
+            if self.team == 'home':
+                shoot_score *= game.home_shoot_frequency
+            
+            # Lower thresholds when dribbling - be more willing to shoot/pass
+            # After 2+ touches, strongly prefer shooting or passing
+            shoot_threshold = 0.08 if self.dribble_touches >= 2 else 0.12
+            pass_threshold = 0.12 if self.dribble_touches >= 2 else 0.18
+            
+            # Take the shot if any reasonable opportunity
+            if shoot_score > shoot_threshold and ctx.dist_to_goal < 35.0:
+                self._clear_dribble_state()
+                self._execute_shoot(ctx, game)
+                return
+            
+            # Pass if good option found
+            if pass_score > pass_threshold and pass_option is not None:
+                self._clear_dribble_state()
+                self._execute_pass(ctx, game, pass_option, pass_target)
+                return
+            
+            # After 3+ touches, force a decision - no more dribbling
+            if self.dribble_touches >= 3:
+                self._clear_dribble_state()
+                if shoot_score > 0.05 and ctx.dist_to_goal < 40.0:
+                    self._execute_shoot(ctx, game)
+                elif pass_option is not None:
+                    self._execute_pass(ctx, game, pass_option, pass_target)
+                else:
+                    self._execute_clearance(ctx, game)
+                return
         
         # GK behavior: pass when safe, throw to corner when under pressure
         if self.role == 'GK':
@@ -1014,8 +1056,14 @@ class Player:
         
         return best_dir, best_score
 
+    def _clear_dribble_state(self):
+        """Clear dribble sequence tracking."""
+        self.is_dribbling = False
+        self.dribble_touches = 0
+
     def _execute_shoot(self, ctx, game):
         """Execute a shot on goal - target corners away from goalkeeper."""
+        self._clear_dribble_state()
         self.has_ball = False
         game.ball.owner_id = None
         
@@ -1038,6 +1086,7 @@ class Player:
 
     def _execute_pass(self, ctx, game, target_player, target_pos=None):
         """Execute a pass to target position (or teammate if no target specified)."""
+        self._clear_dribble_state()
         passer_id = self.id  # Remember who is passing
         self.has_ball = False
         self.received_from_player_id = None  # Clear on pass
@@ -1083,6 +1132,10 @@ class Player:
         # Set touch cooldown - cannot reacquire ball for DRIBBLE_TOUCH_INTERVAL ticks
         # Each tick is 0.1 time units, so multiply by 0.1
         self.touch_cooldown_until = game.time + (DRIBBLE_TOUCH_INTERVAL * 0.1)
+        
+        # Mark as dribbling for re-evaluation on next touch
+        self.is_dribbling = True
+        self.dribble_touches += 1
         
         # Kick ball ahead by DRIBBLE_TOUCH_DISTANCE in the movement direction
         kick_distance = DRIBBLE_TOUCH_DISTANCE
