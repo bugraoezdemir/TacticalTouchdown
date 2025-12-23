@@ -1680,15 +1680,32 @@ class Player:
                 
                 # WIDE positions for wingers - use touchline corridors
                 if self.lateral_role == 'left':
-                    target_y = 12.0 + random.uniform(-3, 3)  # Near top touchline
+                    base_y = 12.0
                 elif self.lateral_role == 'right':
-                    target_y = 88.0 + random.uniform(-3, 3)  # Near bottom touchline
+                    base_y = 88.0
                 elif self.lateral_role == 'center_left':
-                    target_y = 30.0 + random.uniform(-5, 5)  # Left half-space
+                    base_y = 30.0
                 elif self.lateral_role == 'center_right':
-                    target_y = 70.0 + random.uniform(-5, 5)  # Right half-space
+                    base_y = 70.0
                 else:
-                    target_y = 50.0 + random.uniform(-8, 8)  # Central
+                    base_y = 50.0
+                
+                # TEAMMATE SPACING: Adjust position to avoid clumping
+                # Check nearby teammates and shift away from them
+                adjustment_y = 0.0
+                for teammate in ctx.teammates:
+                    if teammate.id == self.id:
+                        continue
+                    teammate_dist = np.linalg.norm(teammate.pos - self.pos)
+                    if teammate_dist < 15.0 and teammate_dist > 0.1:
+                        # Push away from close teammate
+                        away_from_teammate = self.pos[1] - teammate.pos[1]
+                        if abs(away_from_teammate) > 0.1:
+                            adjustment_y += np.sign(away_from_teammate) * (15.0 - teammate_dist) * 0.3
+                
+                # Apply adjustment with limits
+                target_y = base_y + adjustment_y + random.uniform(-3, 3)
+                target_y = float(np.clip(target_y, 5.0, 95.0))
                 
                 support_target = np.array([target_x, target_y])
                 
@@ -2272,9 +2289,25 @@ class Player:
                 d = np.linalg.norm(cand - opp_pos)
                 min_opp_dist = min(float(min_opp_dist), float(d))
             space_score = min(min_opp_dist / 15.0, 1.0)
-            score += space_score * 0.3
+            score += space_score * 0.25
             
-            # 3. Goal progress - closer to attacking goal is better (for attackers)
+            # 4. TEAMMATE SPACING PENALTY - avoid clumping with other teammates
+            min_teammate_dist = 100.0
+            for teammate in ctx.teammates:
+                if teammate.id == self.id or teammate.id == ball_owner.id:
+                    continue  # Skip self and ball carrier
+                d = np.linalg.norm(cand - teammate.pos)
+                min_teammate_dist = min(float(min_teammate_dist), float(d))
+            
+            # Strong penalty for being too close to teammates (optimal spacing is 12-20 units)
+            if min_teammate_dist < 8.0:
+                score -= 0.4  # Heavy penalty for very close
+            elif min_teammate_dist < 12.0:
+                score -= 0.2 * (1.0 - (min_teammate_dist - 8.0) / 4.0)  # Gradual penalty
+            elif min_teammate_dist > 12.0 and min_teammate_dist < 25.0:
+                score += 0.1  # Small bonus for good spacing
+            
+            # 5. Goal progress - closer to attacking goal is better (for attackers)
             my_goal_dist = distance_to_goal(self.pos, ctx.team)
             cand_goal_dist = distance_to_goal(cand, ctx.team)
             if my_goal_dist > 5:
