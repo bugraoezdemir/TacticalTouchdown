@@ -21,7 +21,7 @@ GK_DIVE_REACH = 10.0  # How far GK can dive to save
 BALL_PASS_SPEED = 2.8  # Faster passes for quicker play
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
-TACKLE_DISTANCE = 3.2  # Slightly reduced for tighter ball control
+TACKLE_DISTANCE = 2.5  # Reduced for tighter ball control - players must be closer to catch
 BALL_FRICTION = 0.95
 
 # Probabilistic decision parameters
