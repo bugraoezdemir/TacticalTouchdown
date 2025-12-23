@@ -1605,6 +1605,61 @@ class Player:
             self._make_gk_decision(ctx, game)
             return
         
+        # SEPARATION FROM BALL CARRIER: If too close to teammate with ball, move away
+        # This is the HIGHEST PRIORITY to prevent clumping around the ball
+        ball_owner = None
+        if game.ball.owner_id is not None:
+            for p in game.players:
+                if p.id == game.ball.owner_id:
+                    ball_owner = p
+                    break
+        
+        if ball_owner is not None and ball_owner.team == self.team and ball_owner.id != self.id:
+            displacement = self.pos - ball_owner.pos  # Vector from ball carrier to me
+            dist_to_carrier = np.linalg.norm(displacement)
+            
+            MIN_SPACING = 10.0  # Minimum distance from ball carrier
+            COMFORTABLE_SPACING = 15.0  # Ideal minimum distance
+            
+            if dist_to_carrier < MIN_SPACING and dist_to_carrier > 0.1:
+                # TOO CLOSE - actively move away using displacement vector
+                away_dir = normalize(displacement)
+                
+                # Move to comfortable spacing distance
+                separation_target = ball_owner.pos + away_dir * COMFORTABLE_SPACING
+                
+                # Keep within bounds
+                separation_target[0] = float(np.clip(separation_target[0], 5.0, 95.0))
+                separation_target[1] = float(np.clip(separation_target[1], 5.0, 95.0))
+                
+                to_target = separation_target - self.pos
+                if np.linalg.norm(to_target) > 1.0:
+                    self.vel = normalize(to_target) * PLAYER_SPEED
+                    return  # Priority: separate first
+        
+        # ALSO: Separate from other teammates (not just ball carrier)
+        for teammate in ctx.teammates:
+            if teammate.id == self.id:
+                continue
+            if ball_owner is not None and teammate.id == ball_owner.id:
+                continue  # Already handled above
+            
+            displacement = self.pos - teammate.pos
+            dist_to_teammate = np.linalg.norm(displacement)
+            
+            if dist_to_teammate < 8.0 and dist_to_teammate > 0.1:
+                # Too close to teammate - move away
+                away_dir = normalize(displacement)
+                separation_target = teammate.pos + away_dir * 12.0
+                
+                separation_target[0] = float(np.clip(separation_target[0], 5.0, 95.0))
+                separation_target[1] = float(np.clip(separation_target[1], 5.0, 95.0))
+                
+                to_target = separation_target - self.pos
+                if np.linalg.norm(to_target) > 1.0:
+                    self.vel = normalize(to_target) * PLAYER_SPEED
+                    return  # Priority: separate
+        
         # PASS RECIPIENT MOVEMENT: When pass is in flight, move TOWARD ball trajectory to receive
         # PRIORITY: Use pre-calculated intercept target from _signal_pass_to_target if available
         ball_speed = np.linalg.norm(game.ball.vel)
@@ -1657,12 +1712,7 @@ class Player:
                         self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
                         return
         
-        ball_owner = None
-        if game.ball.owner_id is not None:
-            for p in game.players:
-                if p.id == game.ball.owner_id:
-                    ball_owner = p
-                    break
+        # ball_owner already determined at start of function
         
         # ATTACK SUPPORT MODE: MID and FWD push forward when teammate is dribbling
         # This MUST be checked BEFORE loose ball chase to prevent teammates from chasing the dribbler's ball
