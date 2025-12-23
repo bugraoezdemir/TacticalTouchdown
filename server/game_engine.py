@@ -22,6 +22,7 @@ BALL_PASS_SPEED = 2.8  # Faster passes for quicker play
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
 TACKLE_DISTANCE = 2.5  # Reduced for tighter ball control - players must be closer to catch
+GK_CATCH_DISTANCE = 3.3  # Goalkeepers have longer reach to catch the ball
 BALL_FRICTION = 0.95
 
 # Probabilistic decision parameters
@@ -3317,63 +3318,66 @@ class Game:
         self.ball.owner_id = None
         
         # Only assign control if someone is close enough AND not on touch cooldown
-        if min_dist < TACKLE_DISTANCE and closest_players:
-            # Filter out players still on cooldown (either dribble or tackle stall)
-            eligible_players = [p for p in closest_players if p.touch_cooldown_until <= self.time]
+        # Check each player against their appropriate distance threshold (GK gets larger range)
+        eligible_players = []
+        for p, d in player_distances:
+            threshold = GK_CATCH_DISTANCE if p.role == 'GK' else TACKLE_DISTANCE
+            if d < threshold and p.touch_cooldown_until <= self.time:
+                eligible_players.append(p)
+        
+        if eligible_players:
+            # Check if this is a tackle (defender winning ball from opponent)
+            previous_owner_team = self.last_touch.team if self.last_touch else None
+            previous_owner_id = self.last_touch.player_id if self.last_touch else None
             
-            if eligible_players:
-                # Check if this is a tackle (defender winning ball from opponent)
-                previous_owner_team = self.last_touch.team if self.last_touch else None
-                previous_owner_id = self.last_touch.player_id if self.last_touch else None
-                
-                # Random tiebreaker if multiple players equally close
-                controller = random.choice(eligible_players)
-                controller.has_ball = True
-                controller.touch_cooldown_until = 0.0  # Reset cooldown on ball acquisition
-                self.ball.owner_id = controller.id
-                
-                # Track who passed to this player (for avoiding return passes)
-                # Only track if this was a same-team pass (not interception/tackle)
-                is_same_team_pass = (previous_owner_team == controller.team) and self.ball.passer_id is not None
-                if is_same_team_pass:
-                    controller.received_from_player_id = self.ball.passer_id
-                else:
-                    controller.received_from_player_id = None  # Clear on interception/tackle
-                
-                self.ball.clear_pass_target()  # Clear pass tracking on control
-                self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
-                
-                # Clear pass intercept targets for all players
+            # Random tiebreaker if multiple players equally close
+            controller = random.choice(eligible_players)
+            controller.has_ball = True
+            controller.touch_cooldown_until = 0.0  # Reset cooldown on ball acquisition
+            self.ball.owner_id = controller.id
+            
+            # Track who passed to this player (for avoiding return passes)
+            # Only track if this was a same-team pass (not interception/tackle)
+            is_same_team_pass = (previous_owner_team == controller.team) and self.ball.passer_id is not None
+            if is_same_team_pass:
+                controller.received_from_player_id = self.ball.passer_id
+            else:
+                controller.received_from_player_id = None  # Clear on interception/tackle
+            
+            self.ball.clear_pass_target()  # Clear pass tracking on control
+            self.last_touch = LastTouch(team=controller.team, player_id=controller.id)
+            
+            # Clear pass intercept targets for all players
+            for p in self.players:
+                p.pass_intercept_target = None
+            
+            # Mark throw-in as touched (for goal prevention rule)
+            if self.last_restart_type == 'throw_in':
+                self.throw_in_touched = True
+            
+            # TACKLE STALL: The player who lost the ball gets a stall cooldown
+            is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
+            
+            # CLEAR ATTACK SUPPORT: When opponent touches ball, attack support ends
+            if is_tackle or (self.attack_support_team and controller.team != self.attack_support_team):
+                self.attack_support_team = None
+            
+            # CLEAR PASS CALLS: When ball changes team, clear all pass calls
+            if is_tackle:
                 for p in self.players:
-                    p.pass_intercept_target = None
-                
-                # Mark throw-in as touched (for goal prevention rule)
-                if self.last_restart_type == 'throw_in':
-                    self.throw_in_touched = True
-                
-                # TACKLE STALL: The player who lost the ball gets a stall cooldown
-                is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
-                
-                # CLEAR ATTACK SUPPORT: When opponent touches ball, attack support ends
-                if is_tackle or (self.attack_support_team and controller.team != self.attack_support_team):
-                    self.attack_support_team = None
-                
-                # CLEAR PASS CALLS: When ball changes team, clear all pass calls
-                if is_tackle:
-                    for p in self.players:
-                        p.pass_call_active = False
-                        p.pass_call_target = None
-                
-                if is_tackle and previous_owner_id is not None:
-                    # Find the player who lost the ball and stall them
-                    for p in self.players:
-                        if p.id == previous_owner_id:
-                            p.touch_cooldown_until = self.time + 1.0  # 1 second stall after being tackled
-                            break
-                
-                # TACKLE CLEARANCE: If defender wins ball from opponent, immediately clear it
-                if is_tackle and controller.role == 'DEF':
-                    self._execute_tackle_clearance(controller)
+                    p.pass_call_active = False
+                    p.pass_call_target = None
+            
+            if is_tackle and previous_owner_id is not None:
+                # Find the player who lost the ball and stall them
+                for p in self.players:
+                    if p.id == previous_owner_id:
+                        p.touch_cooldown_until = self.time + 1.0  # 1 second stall after being tackled
+                        break
+            
+            # TACKLE CLEARANCE: If defender wins ball from opponent, immediately clear it
+            if is_tackle and controller.role == 'DEF':
+                self._execute_tackle_clearance(controller)
         
         # Update Players - each player makes a decision
         for p in self.players:
