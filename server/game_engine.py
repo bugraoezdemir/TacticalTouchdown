@@ -29,7 +29,7 @@ DECISION_RANDOMNESS = 0.15  # How much randomness in decisions (0-1)
 PASS_SELECTION_RANDOMNESS = 0.25  # Randomness in pass target selection
 
 # Decision weights - forward-focused passing
-PASS_SAFETY_WEIGHT = 0.50      # Increased - safety is paramount
+PASS_SAFETY_WEIGHT = 0.65      # Very high - safety is paramount, avoid risky passes
 PASS_GOAL_PROGRESS_WEIGHT = 0.30 # Reduced - don't sacrifice safety for progress
 PASS_DISTANCE_WEIGHT = 0.2
 SPACE_PASS_BONUS = 0.15  # Re-enabled for space passes
@@ -924,8 +924,8 @@ class Player:
             # Check passing lane quality - allow more passes through
             lane_quality = calculate_passing_lane_quality(
                 self.pos, target_pos, ctx.opponent_positions)
-            if lane_quality < 0.2:
-                continue  # Lane is too blocked
+            if lane_quality < 0.35:
+                continue  # Lane is blocked - require clearer lanes
             
             # Evaluate interception risk - check all opponents
             # Margin = how much sooner ball arrives than opponent (positive = safe)
@@ -945,9 +945,9 @@ class Player:
                 margin = time_opp_at_point - time_ball_at_point
                 min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            # MUCH STRICTER: Require substantial positive margin (0.5 = ~1.25s lead)
-            if min_intercept_margin < 0.5:
-                continue  # Reject passes where opponent can get close to ball
+            # VERY STRICT: Require large positive margin (0.8 = ~2s lead for ball)
+            if min_intercept_margin < 0.8:
+                continue  # Reject any pass where opponent has a chance to intercept
             
             # Score components - higher margin = safer (margin > 0 means ball arrives first)
             safety_score = min(1.0, max(0.0, (min_intercept_margin + 1.0) / 3.0))
@@ -1239,8 +1239,8 @@ class Player:
             lane_quality = calculate_passing_lane_quality(
                 self.pos, teammate.pos, ctx.opponent_positions)
             
-            if lane_quality < 0.4:
-                continue  # Lane is blocked
+            if lane_quality < 0.5:
+                continue  # Lane is blocked - require clear lanes
             
             # Calculate time margins for interception
             ball_time = pass_dist / BALL_PASS_SPEED
@@ -1256,8 +1256,8 @@ class Player:
                 margin = time_opp_at_point - time_ball_at_point
                 min_intercept_margin = min(min_intercept_margin, float(margin))
             
-            if min_intercept_margin < 0.5:
-                continue  # High interception risk - require safe margin
+            if min_intercept_margin < 0.8:
+                continue  # High interception risk - require very safe margin
             
             # Score the pass
             safety_score = min(1.0, max(0.0, min_intercept_margin / 2.0))
