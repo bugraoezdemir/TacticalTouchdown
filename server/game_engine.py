@@ -444,8 +444,12 @@ def validate_pass(passer_pos, target_pos, passer_team, opponent_positions,
     elif passer_role == 'DEF' and dist_from_own_goal < 40.0:
         base_margin += 0.1  # Defenders in own half slightly safer
     
-    # FULL INTERCEPTION ANALYSIS with time-based trajectory sampling
-    # Sample at fixed time intervals to catch all potential blockers
+    # TRIANGLE-BASED INTERCEPTION MODEL
+    # The key insight: interception likelihood depends on the RATIO of:
+    # - Distance along path (passer to intercept point) = ball travel time
+    # - PERPENDICULAR distance (opponent to path) = opponent sprint time
+    # If opponent can sprint perpendicular faster than ball travels along path → interception
+    
     ball_travel_time = pass_dist / ball_speed
     min_margin = float('inf')
     worst_interceptor_dist = float('inf')
@@ -456,48 +460,43 @@ def validate_pass(passer_pos, target_pos, passer_team, opponent_positions,
     # Normalize pass direction
     pass_dir = pass_vec / pass_dist
     
-    # Sample at fixed time intervals (every 0.1 seconds)
-    SAMPLE_DT = 0.1  # seconds
-    num_samples = max(5, int(ball_travel_time / SAMPLE_DT) + 1)
-    
     for opp_pos in opponent_positions:
-        # ALWAYS check the closest projection point first
+        # Project opponent onto the pass line to find intercept point
         closest_on_path = project_point_to_segment(opp_pos, passer_pos, target_pos)
-        closest_dist = np.linalg.norm(opp_pos - closest_on_path)
-        dist_along_path = np.linalg.norm(closest_on_path - passer_pos)
-        ball_time_at_closest = dist_along_path / ball_speed
+        
+        # PERPENDICULAR distance from opponent to the pass line
+        perp_dist = np.linalg.norm(opp_pos - closest_on_path)
+        
+        # Distance ALONG the path from passer to the intercept point
+        along_dist = np.linalg.norm(closest_on_path - passer_pos)
+        
+        # TRIANGLE MODEL:
+        # Ball time = along_dist / ball_speed (time for ball to reach intercept point)
+        # Opponent time = perp_dist / sprint_speed (time for opponent to reach path)
+        
+        ball_time_at_intercept = along_dist / ball_speed
         
         # If opponent is IN the lane (blocking), immediate rejection
-        if closest_dist < INTERCEPT_RADIUS:
-            # BLOCKER DETECTED - zero reaction time (they're already there)
-            margin = 0.0 - ball_time_at_closest  # Negative = blocker wins
+        if perp_dist < INTERCEPT_RADIUS:
+            # BLOCKER DETECTED - they're already there, no travel needed
+            margin = 0.0 - ball_time_at_intercept  # Negative = blocker wins
             if margin < min_margin:
                 min_margin = float(margin)
-                worst_interceptor_dist = float(closest_dist)
-            continue  # No need to check more samples for this opponent
+                worst_interceptor_dist = float(perp_dist)
+            continue
         
-        # Sample along the trajectory at time intervals
-        for sample_i in range(num_samples + 1):
-            t = sample_i * SAMPLE_DT
-            if t > ball_travel_time:
-                t = ball_travel_time  # Don't go past the target
-            
-            sample_dist = t * ball_speed
-            sample_pos = passer_pos + pass_dir * sample_dist
-            
-            # Distance from opponent to this sample point
-            opp_dist_to_sample = np.linalg.norm(opp_pos - sample_pos)
-            
-            # Time for opponent to reach this point (accounting for reach)
-            opp_dist_to_intercept = max(0.0, opp_dist_to_sample - INTERCEPT_RADIUS)
-            opp_time_at_sample = opp_dist_to_intercept / PLAYER_SPRINT_SPEED
-            
-            # Margin = opponent arrival time - ball arrival time
-            margin = opp_time_at_sample - t
-            
-            if margin < min_margin:
-                min_margin = float(margin)
-                worst_interceptor_dist = float(opp_dist_to_sample)
+        # Opponent must sprint PERPENDICULAR distance (minus reach) to intercept
+        opp_sprint_dist = max(0.0, perp_dist - INTERCEPT_RADIUS)
+        opp_time_to_intercept = opp_sprint_dist / PLAYER_SPRINT_SPEED
+        
+        # THE TRIANGLE RATIO: Does ball arrive before opponent?
+        # margin > 0 means opponent arrives AFTER ball (safe)
+        # margin < 0 means opponent arrives BEFORE ball (intercepted)
+        margin = opp_time_to_intercept - ball_time_at_intercept
+        
+        if margin < min_margin:
+            min_margin = float(margin)
+            worst_interceptor_dist = float(perp_dist)
     
     # RECEIVER PRESSURE CHECK - receiver has first-touch advantage
     # Only penalize if opponent arrives BEFORE the ball (not after)
