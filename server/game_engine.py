@@ -1330,25 +1330,41 @@ class Player:
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
     def _execute_pass(self, ctx, game, target_player, target_pos=None):
-        """Execute a pass to target position (or teammate if no target specified)."""
+        """Execute an INFORMED pass - always computes optimal trajectory and intercept point."""
         self._clear_dribble_state()
         passer_id = self.id  # Remember who is passing
         self.has_ball = False
         self.received_from_player_id = None  # Clear on pass
         game.ball.owner_id = None
         
-        # Use provided target position (for space passes) or teammate position
-        if target_pos is None:
-            # Pass directly to teammate with small lead
-            target_pos = target_player.pos + target_player.vel * 3.0
+        # INFORMED PASSING: Always compute optimal trajectory and intercept
+        # This works whether target_pos is provided or not
+        computed_target, is_runway, intercept_point = self._compute_informed_pass(ctx, target_player)
+        
+        # Use computed target unless caller provided one that's significantly different
+        # (allows manual runway passes to override if needed)
+        if target_pos is not None:
+            provided_dist = np.linalg.norm(target_pos - target_player.pos)
+            computed_dist = np.linalg.norm(computed_target - target_player.pos)
+            # If caller's target is a lead/runway pass (further from player), use it
+            if provided_dist > computed_dist + 5.0:
+                # Caller's target is a deliberate runway - use it as intercept point
+                target_pos = target_pos
+                intercept_point = target_pos.copy()
+                is_runway = True
+            else:
+                # Use the informed computation's result
+                target_pos = computed_target
+        else:
+            target_pos = computed_target
         
         # Track pass target for recipient movement
         game.ball.target_player_id = target_player.id
         game.ball.target_pos = target_pos.copy() if isinstance(target_pos, np.ndarray) else np.array(target_pos)
         game.ball.passer_id = passer_id  # Track who made this pass
         
-        # SIGNAL PASS: Immediately notify target player to start moving toward ball trajectory
-        self._signal_pass_to_target(game, target_player, target_pos, self.pos)
+        # SIGNAL PASS: Always notify target player with intercept point
+        self._signal_pass_to_target(game, target_player, target_pos, self.pos, intercept_point if is_runway else None)
         
         # ALWAYS pass toward the target - never redirect to goal
         pass_vec = target_pos - self.pos
@@ -1370,13 +1386,151 @@ class Player:
         # Track last touch
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
     
-    def _signal_pass_to_target(self, game, target_player, target_pos, passer_pos):
+    def _compute_informed_pass(self, ctx, target_player):
+        """Compute optimal pass trajectory considering interception risk and scoring position.
+        
+        Returns:
+            (target_pos, is_runway, intercept_point) - where to aim, whether it's a runway pass,
+            and where the receiver should intercept
+        """
+        receiver_pos = target_player.pos
+        passer_pos = self.pos
+        
+        # Evaluate direct pass safety
+        direct_dist = np.linalg.norm(receiver_pos - passer_pos)
+        direct_time = direct_dist / BALL_PASS_SPEED
+        
+        # Check interception risk for direct pass
+        min_margin_direct = float('inf')
+        for opp_pos in ctx.opponent_positions:
+            closest_on_path = project_point_to_segment(opp_pos, passer_pos, receiver_pos)
+            opp_dist = np.linalg.norm(opp_pos - closest_on_path)
+            path_dist = np.linalg.norm(closest_on_path - passer_pos)
+            
+            ball_time_at_point = path_dist / BALL_PASS_SPEED
+            opp_time_at_point = opp_dist / PLAYER_SPRINT_SPEED
+            margin = opp_time_at_point - ball_time_at_point
+            min_margin_direct = min(min_margin_direct, float(margin))
+        
+        # Check if receiver is an attacker in poor scoring position
+        is_attacker = target_player.role == 'FWD'
+        receiver_goal_dist = distance_to_goal(receiver_pos, self.team)
+        in_scoring_zone = receiver_goal_dist < 25.0
+        
+        # Decision: use runway pass if risky OR if attacker can move to better position
+        use_runway = False
+        best_runway_target = None
+        best_intercept = None
+        
+        if min_margin_direct < 1.0:  # Risky direct pass
+            use_runway = True
+        elif is_attacker and not in_scoring_zone and receiver_goal_dist < 50.0:
+            # Attacker could benefit from moving into scoring position
+            use_runway = True
+        
+        if use_runway:
+            # Find best runway pass trajectory
+            goal_center = ctx.goal_center
+            best_runway_score = -999.0
+            
+            # Generate candidate runway directions (toward goal, with lateral variations)
+            to_goal = normalize(goal_center - receiver_pos)
+            perp = np.array([-to_goal[1], to_goal[0]])
+            
+            candidates = []
+            # Straight toward goal at various distances
+            for dist in [8.0, 12.0, 18.0, 25.0]:
+                candidates.append(receiver_pos + to_goal * dist)
+            
+            # Angled runs
+            for angle_offset in [-0.3, -0.15, 0.15, 0.3]:
+                for dist in [10.0, 15.0, 20.0]:
+                    dir_vec = normalize(to_goal + perp * angle_offset)
+                    candidates.append(receiver_pos + dir_vec * dist)
+            
+            for runway_target in candidates:
+                # Keep in bounds
+                runway_target = np.array([
+                    float(np.clip(runway_target[0], 5.0, 95.0)),
+                    float(np.clip(runway_target[1], 5.0, 95.0))
+                ])
+                
+                # Find meeting point along pass trajectory
+                pass_dir = normalize(runway_target - passer_pos)
+                pass_dist = np.linalg.norm(runway_target - passer_pos)
+                
+                # Test meeting points
+                for test_dist in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0]:
+                    if test_dist > pass_dist:
+                        break
+                    
+                    meeting_point = passer_pos + pass_dir * test_dist
+                    
+                    # Can receiver reach this point?
+                    receiver_dist = np.linalg.norm(meeting_point - receiver_pos)
+                    receiver_time = receiver_dist / PLAYER_SPRINT_SPEED
+                    ball_time = test_dist / BALL_PASS_SPEED
+                    
+                    if receiver_time > ball_time + 1.5:
+                        continue  # Receiver can't reach in time
+                    
+                    # Check interception risk for this trajectory
+                    min_margin = float('inf')
+                    for opp_pos in ctx.opponent_positions:
+                        closest = project_point_to_segment(opp_pos, passer_pos, meeting_point)
+                        opp_dist = np.linalg.norm(opp_pos - closest)
+                        path_dist = np.linalg.norm(closest - passer_pos)
+                        
+                        ball_t = path_dist / BALL_PASS_SPEED
+                        opp_t = opp_dist / PLAYER_SPRINT_SPEED
+                        margin = opp_t - ball_t
+                        min_margin = min(min_margin, float(margin))
+                    
+                    if min_margin < 0.5:
+                        continue  # Still too risky
+                    
+                    # Score this option
+                    score = 0.0
+                    
+                    # Safety bonus
+                    score += min(min_margin, 2.0) * 0.3
+                    
+                    # Goal proximity bonus (for attackers)
+                    meeting_goal_dist = distance_to_goal(meeting_point, self.team)
+                    if is_attacker and meeting_goal_dist < receiver_goal_dist:
+                        score += (receiver_goal_dist - meeting_goal_dist) / 30.0 * 0.4
+                    
+                    # Prefer closer intercepts (easier to execute)
+                    score += (1.0 - test_dist / 35.0) * 0.2
+                    
+                    if score > best_runway_score:
+                        best_runway_score = score
+                        best_runway_target = meeting_point.copy()
+                        best_intercept = meeting_point.copy()
+        
+        # Return results
+        if use_runway and best_runway_target is not None:
+            return best_runway_target, True, best_intercept
+        else:
+            # Direct pass with small lead
+            lead_target = receiver_pos + target_player.vel * 2.0
+            return lead_target, False, lead_target
+    
+    def _signal_pass_to_target(self, game, target_player, target_pos, passer_pos, intercept_point=None):
         """Signal pass recipient to immediately start moving toward ball trajectory.
         
-        This calculates the optimal intercept point along the ball path and sets
-        the target player's velocity to sprint toward it.
+        If intercept_point is provided (for runway passes), receiver sprints there.
+        Otherwise calculates optimal intercept along ball path.
         """
-        # Calculate ball trajectory
+        if intercept_point is not None:
+            # Runway pass - receiver knows exactly where to go
+            if np.linalg.norm(intercept_point - target_player.pos) > 1.0:
+                run_dir = normalize(intercept_point - target_player.pos)
+                target_player.vel = run_dir * PLAYER_SPRINT_SPEED
+                target_player.pass_intercept_target = intercept_point.copy()
+            return
+        
+        # Calculate ball trajectory for direct pass
         ball_dir = normalize(target_pos - passer_pos)
         ball_speed = BALL_PASS_SPEED
         
@@ -1400,15 +1554,12 @@ class Player:
             intercept_target = closest_on_path
         else:
             # Meet the ball further along its path
-            # Estimate where paths cross
             intercept_target = target_pos  # Default to target position
         
         # Set receiver velocity toward intercept point
         if np.linalg.norm(intercept_target - target_player.pos) > 1.0:
             run_dir = normalize(intercept_target - target_player.pos)
             target_player.vel = run_dir * PLAYER_SPRINT_SPEED
-            
-            # Store the intercept target for continued movement
             target_player.pass_intercept_target = intercept_target.copy()
 
     def _execute_dribble(self, ctx, game, direction):
@@ -2219,9 +2370,20 @@ class Player:
         game.last_touch = LastTouch(team=self.team, player_id=self.id)
 
     def _execute_runway_pass(self, ctx, game, teammate, lead_target):
-        """Execute a lead pass to where teammate is running."""
+        """Execute a lead pass to where teammate is running (through ball)."""
+        self._clear_dribble_state()
+        passer_id = self.id
         self.has_ball = False
+        self.received_from_player_id = None
         game.ball.owner_id = None
+        
+        # Track pass target
+        game.ball.target_player_id = teammate.id
+        game.ball.target_pos = lead_target.copy() if isinstance(lead_target, np.ndarray) else np.array(lead_target)
+        game.ball.passer_id = passer_id
+        
+        # Signal the teammate to sprint to the lead target (runway pass = intercept at lead_target)
+        self._signal_pass_to_target(game, teammate, lead_target, self.pos, lead_target.copy())
         
         pass_vec = lead_target - self.pos
         pass_dir = normalize(pass_vec)
