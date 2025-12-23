@@ -21,7 +21,7 @@ GK_DIVE_REACH = 10.0  # How far GK can dive to save
 BALL_PASS_SPEED = 2.8  # Faster passes for quicker play
 BALL_SHOOT_SPEED = 4.5  # At least 2x faster than passes
 BALL_DRIBBLE_SPEED = 0.6
-TACKLE_DISTANCE = 3.5  # Increased to catch fast-moving balls (ball speed 2.8/tick)
+TACKLE_DISTANCE = 3.2  # Slightly reduced for tighter ball control
 BALL_FRICTION = 0.95
 
 # Probabilistic decision parameters
@@ -507,14 +507,18 @@ class Player:
                 self._execute_pass(ctx, game, pass_option, pass_target)
                 return
             
-            # 3. CHANGE DIRECTION if new path is meaningfully better (more lenient)
+            # 3. CHANGE DIRECTION if new path is meaningfully better (very lenient for fluid movement)
             should_change_direction = False
             if self.last_dribble_dir is not None:
-                # Change if current path is blocked and new path is any better
-                if current_clearance < 10.0 and new_clearance > current_clearance + 1.5:
+                # Change if current path is getting blocked and new path is any better
+                if current_clearance < 12.0 and new_clearance > current_clearance + 1.0:
                     should_change_direction = True
-                # Also change if new direction is significantly better overall
-                elif new_clearance > current_clearance * 1.3 and new_clearance > 8.0:
+                # Also change if new direction is moderately better overall
+                elif new_clearance > current_clearance * 1.2 and new_clearance > 6.0:
+                    should_change_direction = True
+                # MIDFIELDERS: Change direction to improve passing angle
+                elif self.role == 'MID' and pass_option is not None and pass_score > 0.2:
+                    # Check if moving sideways opens better passing lane
                     should_change_direction = True
             
             if should_change_direction:
@@ -714,8 +718,12 @@ class Player:
                 # Pass ONLY to hot teammate (near goal with scoring chance)
                 self._execute_pass(ctx, game, hot_teammate, hot_teammate.pos)
             elif dribble_score_adj > 0.20 * rand_factor and can_dribble:
-                # Dribble if no hot teammate available
-                self._execute_dribble(ctx, game, dribble_dir)
+                # MIDFIELDERS in attack zone: prefer passing, only dribble to create angle
+                if self.role == 'MID' and pass_option is not None and pass_score > 0.12:
+                    self._execute_pass(ctx, game, pass_option, pass_target)
+                else:
+                    # Dribble if no good pass available
+                    self._execute_dribble(ctx, game, dribble_dir)
             elif pass_option is not None:
                 # Fall back to normal pass only if can't dribble
                 self._execute_pass(ctx, game, pass_option, pass_target)
@@ -727,8 +735,17 @@ class Player:
                 # Execute through ball to start attack
                 self._execute_runway_pass(ctx, game, runway_teammate, runway_target)
             elif is_attacking_player and has_space_ahead and dribble_score_adj > 0.25 * rand_factor and can_dribble:
-                # Midfielders/forwards can dribble forward into empty space
-                self._execute_dribble(ctx, game, dribble_dir)
+                # MIDFIELDERS: Only dribble to improve passing angle, not just for space
+                if self.role == 'MID':
+                    # Check if pass options are poor - then dribble to create better angle
+                    if pass_score < 0.15 or pass_option is None:
+                        self._execute_dribble(ctx, game, dribble_dir)
+                    else:
+                        # Have good pass - prefer passing over dribbling
+                        self._execute_pass(ctx, game, pass_option, pass_target)
+                else:
+                    # Forwards can dribble forward into empty space
+                    self._execute_dribble(ctx, game, dribble_dir)
             elif pass_score_adj >= 0.08 and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             elif min_opp_dist < 5.0 and pass_score < 0.1:
