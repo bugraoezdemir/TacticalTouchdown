@@ -444,34 +444,60 @@ def validate_pass(passer_pos, target_pos, passer_team, opponent_positions,
     elif passer_role == 'DEF' and dist_from_own_goal < 40.0:
         base_margin += 0.1  # Defenders in own half slightly safer
     
-    # FULL INTERCEPTION ANALYSIS
-    # Check EVERY opponent, not just those near the lane
+    # FULL INTERCEPTION ANALYSIS with time-based trajectory sampling
+    # Sample at fixed time intervals to catch all potential blockers
     ball_travel_time = pass_dist / ball_speed
     min_margin = float('inf')
     worst_interceptor_dist = float('inf')
     
+    # Interception radius - opponent can stick out leg/body to intercept
+    INTERCEPT_RADIUS = 1.5  # units (player can reach ball within this distance)
+    
+    # Normalize pass direction
+    pass_dir = pass_vec / pass_dist
+    
+    # Sample at fixed time intervals (every 0.1 seconds)
+    SAMPLE_DT = 0.1  # seconds
+    num_samples = max(5, int(ball_travel_time / SAMPLE_DT) + 1)
+    
     for opp_pos in opponent_positions:
-        # Find where opponent can intercept on the pass path
+        # ALWAYS check the closest projection point first
         closest_on_path = project_point_to_segment(opp_pos, passer_pos, target_pos)
-        
-        # Distance opponent must travel to reach intercept point
-        opp_dist_to_intercept = np.linalg.norm(opp_pos - closest_on_path)
-        
-        # Distance along pass path to intercept point
+        closest_dist = np.linalg.norm(opp_pos - closest_on_path)
         dist_along_path = np.linalg.norm(closest_on_path - passer_pos)
+        ball_time_at_closest = dist_along_path / ball_speed
         
-        # Time for ball to reach that point
-        ball_time_at_point = dist_along_path / ball_speed
+        # If opponent is IN the lane (blocking), immediate rejection
+        if closest_dist < INTERCEPT_RADIUS:
+            # BLOCKER DETECTED - zero reaction time (they're already there)
+            margin = 0.0 - ball_time_at_closest  # Negative = blocker wins
+            if margin < min_margin:
+                min_margin = float(margin)
+                worst_interceptor_dist = float(closest_dist)
+            continue  # No need to check more samples for this opponent
         
-        # Time for opponent to reach that point (sprinting)
-        opp_time_at_point = opp_dist_to_intercept / PLAYER_SPRINT_SPEED
-        
-        # Margin: positive means ball arrives first, negative means opponent arrives first
-        margin = opp_time_at_point - ball_time_at_point
-        
-        if margin < min_margin:
-            min_margin = float(margin)
-            worst_interceptor_dist = float(opp_dist_to_intercept)
+        # Sample along the trajectory at time intervals
+        for sample_i in range(num_samples + 1):
+            t = sample_i * SAMPLE_DT
+            if t > ball_travel_time:
+                t = ball_travel_time  # Don't go past the target
+            
+            sample_dist = t * ball_speed
+            sample_pos = passer_pos + pass_dir * sample_dist
+            
+            # Distance from opponent to this sample point
+            opp_dist_to_sample = np.linalg.norm(opp_pos - sample_pos)
+            
+            # Time for opponent to reach this point (accounting for reach)
+            opp_dist_to_intercept = max(0.0, opp_dist_to_sample - INTERCEPT_RADIUS)
+            opp_time_at_sample = opp_dist_to_intercept / PLAYER_SPRINT_SPEED
+            
+            # Margin = opponent arrival time - ball arrival time
+            margin = opp_time_at_sample - t
+            
+            if margin < min_margin:
+                min_margin = float(margin)
+                worst_interceptor_dist = float(opp_dist_to_sample)
     
     # RECEIVER PRESSURE CHECK - receiver has first-touch advantage
     # Only penalize if opponent arrives BEFORE the ball (not after)
@@ -531,6 +557,85 @@ def validate_pass(passer_pos, target_pos, passer_team, opponent_positions,
         failure_reason=failure_reason,
         worst_interceptor_dist=float(worst_interceptor_dist)
     )
+
+
+# ============================================================================
+# PASS CALL SYSTEM
+# ============================================================================
+PASS_CALL_COOLDOWN = 3.0  # Seconds between pass calls
+PASS_CALL_DURATION = 2.0  # How long a call remains active
+PASS_CALL_MIN_DISTANCE = 15.0  # Minimum distance from ball owner to call
+PASS_CALL_DANGER_ZONE_X = 35.0  # Must be this deep into opponent's half to call
+
+
+def can_make_pass_call(player, ball_owner, game_time):
+    """Check if a player is eligible to make a pass call."""
+    if ball_owner is None or ball_owner.team != player.team:
+        return False  # Can only call when teammate has ball
+    
+    if player.id == ball_owner.id:
+        return False  # Can't call for yourself
+    
+    if player.pass_call_cooldown_until > game_time:
+        return False  # On cooldown
+    
+    if player.pass_call_active:
+        return False  # Already calling
+    
+    # Must be in attacking half (danger zone for opponents)
+    if player.team == 'home':
+        in_danger_zone = player.pos[0] > (100 - PASS_CALL_DANGER_ZONE_X)
+    else:
+        in_danger_zone = player.pos[0] < PASS_CALL_DANGER_ZONE_X
+    
+    if not in_danger_zone:
+        return False
+    
+    # Must be reasonable distance from ball owner
+    dist_to_ball = np.linalg.norm(player.pos - ball_owner.pos)
+    if dist_to_ball < PASS_CALL_MIN_DISTANCE:
+        return False  # Too close
+    
+    # Only FWD and attacking MID should make pass calls
+    if player.role not in ['FWD', 'MID']:
+        return False
+    
+    return True
+
+
+def calculate_pass_call_target(player, game):
+    """Calculate where the player wants to receive the ball - a run into goal area."""
+    goal_center = np.array([100.0, 50.0]) if player.team == 'home' else np.array([0.0, 50.0])
+    
+    # Calculate run target - toward goal but with some angle variation
+    to_goal = goal_center - player.pos
+    to_goal_dist = np.linalg.norm(to_goal)
+    to_goal_dir = normalize(to_goal) if to_goal_dist > 0.1 else np.array([1.0, 0.0])
+    
+    # Run distance based on current position (shorter if already near goal)
+    if player.team == 'home':
+        run_dist = min(15.0, max(5.0, 90.0 - player.pos[0]))  # Stop near goal line
+    else:
+        run_dist = min(15.0, max(5.0, player.pos[0] - 10.0))
+    
+    # Add lateral offset based on lateral role (wingers cut inside, center stays central)
+    lateral_offset = 0.0
+    if player.lateral_role in ['left', 'center_left']:
+        lateral_offset = 5.0  # Cut right slightly
+    elif player.lateral_role in ['right', 'center_right']:
+        lateral_offset = -5.0  # Cut left slightly
+    
+    # Calculate target position
+    run_target = player.pos + to_goal_dir * run_dist
+    run_target[1] = np.clip(run_target[1] + lateral_offset, 15.0, 85.0)
+    
+    # Don't run past the goal line
+    if player.team == 'home':
+        run_target[0] = min(run_target[0], 95.0)
+    else:
+        run_target[0] = max(run_target[0], 5.0)
+    
+    return run_target
 
 
 class DecisionContext:
@@ -612,6 +717,12 @@ class Player:
         
         # Pass intercept target - where to run to receive a pass
         self.pass_intercept_target = None
+        
+        # PASS CALL SYSTEM - players can call for passes from ball-owning teammates
+        self.pass_call_active = False        # Is this player calling for a pass?
+        self.pass_call_target = None         # Where caller wants to receive (goal area run)
+        self.pass_call_timestamp = 0.0       # When the call was made
+        self.pass_call_cooldown_until = 0.0  # Prevent spam calls
     
     def to_dict(self):
         return {
@@ -842,6 +953,65 @@ class Player:
                     runway_score = score
                     runway_target = target
                     runway_teammate = teammate
+        
+        # PASS CALL RESPONSE: Check for active pass calls from teammates
+        # Players who are calling are already running to their target position
+        pass_call_teammate = None
+        pass_call_target_pos = None
+        pass_call_valid = False
+        
+        for teammate in ctx.teammates:
+            if teammate.pass_call_active and teammate.pass_call_target is not None:
+                # Teammate is calling! Calculate where they WILL BE when ball arrives
+                # Use iterative refinement for accurate meeting point
+                to_target = teammate.pass_call_target - teammate.pos
+                dist_to_target = np.linalg.norm(to_target)
+                
+                if dist_to_target > 0.5:
+                    run_dir = normalize(to_target)
+                    
+                    # ITERATIVE PREDICTION: converge on meeting point
+                    predicted_pos = teammate.pos.copy()
+                    for _ in range(3):  # 3 iterations is usually enough
+                        # Calculate pass distance to current predicted position
+                        pass_dist = np.linalg.norm(predicted_pos - self.pos)
+                        pass_time = pass_dist / BALL_PASS_SPEED
+                        
+                        # Calculate where teammate will be after pass_time
+                        run_distance = min(PLAYER_SPRINT_SPEED * pass_time, dist_to_target)
+                        predicted_pos = teammate.pos + run_dir * run_distance
+                else:
+                    # Already at target
+                    predicted_pos = teammate.pass_call_target.copy()
+                
+                # Validate pass to predicted position
+                validation = validate_pass(
+                    passer_pos=self.pos,
+                    target_pos=predicted_pos,
+                    passer_team=ctx.team,
+                    opponent_positions=ctx.opponent_positions,
+                    passer_role=self.role
+                )
+                
+                if validation.ok:
+                    # Check this is a forward pass (progress toward goal)
+                    target_goal_dist = distance_to_goal(predicted_pos, ctx.team)
+                    if target_goal_dist < ctx.dist_to_goal:  # Forward progress
+                        pass_call_teammate = teammate
+                        pass_call_target_pos = predicted_pos
+                        pass_call_valid = True
+                        break  # Take the first valid call
+        
+        # If a valid pass call exists, prioritize it!
+        if pass_call_valid and pass_call_teammate is not None:
+            # Clear the teammate's pass call state (they're about to receive)
+            pass_call_teammate.pass_call_active = False
+            pass_call_teammate.pass_call_cooldown_until = game.time + PASS_CALL_COOLDOWN
+            pass_call_teammate.pass_intercept_target = pass_call_target_pos
+            
+            # Execute the runway pass to the call target
+            self._execute_runway_pass(ctx, game, pass_call_teammate, pass_call_target_pos)
+            return
         
         # PROBABILISTIC DECISION-MAKING: Add randomness to thresholds
         rand_factor = random.uniform(1.0 - DECISION_RANDOMNESS, 1.0 + DECISION_RANDOMNESS)
@@ -2092,6 +2262,47 @@ class Player:
         # ATTACK SUPPORT MODE: MID and FWD push forward when teammate is dribbling
         # This MUST be checked BEFORE loose ball chase to prevent teammates from chasing the dribbler's ball
         attack_support_active = (game.attack_support_team == self.team)
+        
+        # PASS CALL SYSTEM: If eligible, player can call for a pass and make a run
+        ball_owner = None
+        for p in game.players:
+            if p.has_ball:
+                ball_owner = p
+                break
+        
+        # Check for pass call opportunity
+        if ball_owner is not None and can_make_pass_call(self, ball_owner, game.time):
+            # Random chance to initiate a call (to prevent all eligible players calling at once)
+            # Higher chance if in great position
+            dist_to_goal = distance_to_goal(self.pos, self.team)
+            call_chance = 0.05  # Base 5% per tick
+            if dist_to_goal < 25.0:
+                call_chance = 0.12  # Higher chance when near goal
+            
+            if random.random() < call_chance:
+                # Initiate pass call!
+                self.pass_call_active = True
+                self.pass_call_target = calculate_pass_call_target(self, game)
+                self.pass_call_timestamp = game.time
+        
+        # If actively calling, run toward target
+        if self.pass_call_active:
+            # Check if call has expired
+            if game.time - self.pass_call_timestamp > PASS_CALL_DURATION:
+                self.pass_call_active = False
+                self.pass_call_target = None
+                self.pass_call_cooldown_until = game.time + PASS_CALL_COOLDOWN
+            elif self.pass_call_target is not None:
+                # Sprint toward call target!
+                to_target = self.pass_call_target - self.pos
+                dist_to_target = np.linalg.norm(to_target)
+                if dist_to_target > 1.5:
+                    self.vel = normalize(to_target) * PLAYER_SPRINT_SPEED
+                else:
+                    # Reached target - wait for pass
+                    self.vel = np.zeros(2)
+                return  # Pass call run takes priority
+        
         if attack_support_active and self.role in ['MID', 'FWD']:
             # Don't make support run if I'm the dribbler (very close to ball)
             my_dist_to_ball = np.linalg.norm(game.ball.pos - self.pos)
@@ -3147,6 +3358,12 @@ class Game:
                 # CLEAR ATTACK SUPPORT: When opponent touches ball, attack support ends
                 if is_tackle or (self.attack_support_team and controller.team != self.attack_support_team):
                     self.attack_support_team = None
+                
+                # CLEAR PASS CALLS: When ball changes team, clear all pass calls
+                if is_tackle:
+                    for p in self.players:
+                        p.pass_call_active = False
+                        p.pass_call_target = None
                 
                 if is_tackle and previous_owner_id is not None:
                     # Find the player who lost the ball and stall them
