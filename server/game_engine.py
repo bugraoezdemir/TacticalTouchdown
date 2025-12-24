@@ -856,7 +856,8 @@ class Player:
                 self._execute_shoot(ctx, game)
                 return
         
-        # GK behavior: pass when safe, throw to corner when under pressure
+        # GK behavior: pass when VERY safe, otherwise throw to corner
+        # GK must be extremely conservative - opponents scoring from GK errors is catastrophic
         if self.role == 'GK':
             # Check pressure level
             nearby_opponents = sum(1 for opp_pos in ctx.opponent_positions 
@@ -865,10 +866,13 @@ class Player:
             
             pass_option, pass_target, pass_score = self._evaluate_pass(ctx)
             
-            if not under_pressure and pass_score >= 0.15 and pass_option is not None:
+            # GK requires VERY high pass safety (0.5+) - much stricter than field players
+            # Only pass if absolutely no pressure AND very safe pass available
+            GK_PASS_SAFETY_THRESHOLD = 0.5
+            if not under_pressure and pass_score >= GK_PASS_SAFETY_THRESHOLD and pass_option is not None:
                 self._execute_pass(ctx, game, pass_option, pass_target)
             else:
-                # Under pressure or no safe pass - throw to corner
+                # Under pressure or no safe pass - throw to corner (safer)
                 self._execute_gk_throw_to_corner(ctx, game)
             return
         
@@ -2158,8 +2162,20 @@ class Player:
             self._make_gk_decision(ctx, game)
             return
         
+        # PRIORITY CHECK: If ball is LOOSE and very close, ALWAYS chase it
+        # This overrides separation - getting the ball is more important
+        my_dist_to_ball = np.linalg.norm(game.ball.pos - self.pos)
+        ball_is_loose = game.ball.owner_id is None
+        
+        if ball_is_loose and my_dist_to_ball < 8.0:
+            # Ball is loose and very close - go get it immediately!
+            to_ball = game.ball.pos - self.pos
+            if my_dist_to_ball > 0.5:
+                self.vel = normalize(to_ball) * PLAYER_SPRINT_SPEED
+                return
+        
         # SEPARATION FROM BALL CARRIER: If too close to teammate with ball, move away
-        # This is the HIGHEST PRIORITY to prevent clumping around the ball
+        # Only applies when a teammate HAS the ball (not loose ball situations)
         ball_owner = None
         if game.ball.owner_id is not None:
             for p in game.players:
@@ -3154,7 +3170,8 @@ class Game:
         self.restart_team = 'home'
         self.last_ball_pos = np.array([50.0, 50.0])  # Track last in-bounds position
         self.last_restart_type = None  # Track last restart type (for throw-in goal prevention)
-        self.throw_in_touched = False  # Has ball been touched after throw-in?
+        self.throw_in_touched = False  # Has ball been touched by DIFFERENT player after throw-in?
+        self.throw_in_taker_id = None  # Track who took the throw-in (goals require different player touch)
         
         # ATTACK SUPPORT MODE: When a player dribbles, teammates push forward
         self.attack_support_team = None  # Team with active dribble ('home' or 'away')
@@ -3359,9 +3376,11 @@ class Game:
             for p in self.players:
                 p.pass_intercept_target = None
             
-            # Mark throw-in as touched (for goal prevention rule)
-            if self.last_restart_type == 'throw_in':
-                self.throw_in_touched = True
+            # Mark throw-in as touched ONLY if a DIFFERENT player receives the ball
+            # This prevents goals scored directly by the throw-in taker
+            if self.last_restart_type == 'throw_in' and not self.throw_in_touched:
+                if self.throw_in_taker_id is not None and controller.id != self.throw_in_taker_id:
+                    self.throw_in_touched = True
             
             # TACKLE STALL: The player who lost the ball gets a stall cooldown
             is_tackle = previous_owner_team is not None and previous_owner_team != controller.team
@@ -3597,6 +3616,13 @@ class Game:
         self.ball.owner_id = None
         self.ball.vel = np.zeros(2)
         
+        # Reset throw-in tracking for all non-throw-in events
+        # This prevents goals from being incorrectly blocked after throw-in rules no longer apply
+        if not event.startswith('throw_in'):
+            self.last_restart_type = None
+            self.throw_in_touched = False
+            self.throw_in_taker_id = None
+        
         if event == 'goal_home':
             self.score['home'] += 1
             self.state = GameState.GOAL_SCORED
@@ -3639,6 +3665,7 @@ class Game:
             self.restart_team = 'home'
             self.last_restart_type = 'throw_in'
             self.throw_in_touched = False
+            self.throw_in_taker_id = None  # Will be set when restart executes
             # Use last in-bounds position for x, clamp y inside field
             y_pos = 2.0 if self.last_ball_pos[1] < 50 else 98.0
             x_pos = float(np.clip(self.last_ball_pos[0], 5, 95))
@@ -3649,6 +3676,7 @@ class Game:
             self.restart_team = 'away'
             self.last_restart_type = 'throw_in'
             self.throw_in_touched = False
+            self.throw_in_taker_id = None  # Will be set when restart executes
             # Use last in-bounds position for x, clamp y inside field
             y_pos = 2.0 if self.last_ball_pos[1] < 50 else 98.0
             x_pos = float(np.clip(self.last_ball_pos[0], 5, 95))
@@ -3685,6 +3713,10 @@ class Game:
             self.ball.owner_id = restart_player.id
             self.ball.pos = restart_player.pos.copy()
             self.last_touch = LastTouch(team=restart_player.team, player_id=restart_player.id)
+            
+            # Track throw-in taker for goal prevention rule
+            if self.last_restart_type == 'throw_in':
+                self.throw_in_taker_id = restart_player.id
         
         self.state = GameState.PLAYING
 
