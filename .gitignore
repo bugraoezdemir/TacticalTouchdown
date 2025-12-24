@@ -17,6 +17,7 @@ attached_assets
 
 # Documentation backups
 README.full.md
+DEPLOYMENT.md
 
 # Environment files
 .env
