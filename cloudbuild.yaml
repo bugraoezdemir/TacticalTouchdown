@@ -15,15 +15,6 @@ steps:
       - 'push'
       - 'gcr.io/$PROJECT_ID/tactical-touchdown:latest'
 
-  # Deploy to Cloud Run
-  - name: 'gcr.io/cloud-builders/gke-deploy'
-    args:
-      - 'run'
-      - '--filename=.'
-      - '--image=gcr.io/$PROJECT_ID/tactical-touchdown:latest'
-      - '--location=europe-west3'
-      - '--output=/workspace/output'
-
   # Deploy using gcloud
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
