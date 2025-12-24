@@ -4,14 +4,24 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { spawn } from "child_process";
 import { createProxyMiddleware } from "http-proxy-middleware";
+import path from "path";
 
 const app = express();
 const httpServer = createServer(app);
 
 // Start Python Backend
 console.log("Starting Python Backend...");
-const pythonProcess = spawn('python3', ['server/main.py'], {
-  stdio: 'inherit'
+// In development, use venv; in production, use system python
+const isDev = process.env.NODE_ENV !== 'production';
+const venvPath = isDev ? path.join(process.cwd(), '.venv') : '/usr/bin';
+const pythonExe = process.platform === 'win32' ? 'python.exe' : 'python3';
+const pythonPath = isDev 
+  ? path.join(venvPath, process.platform === 'win32' ? 'Scripts' : 'bin', pythonExe)
+  : path.join(venvPath, pythonExe);
+
+const pythonProcess = spawn(pythonPath, ['server/main.py'], {
+  stdio: 'inherit',
+  cwd: process.cwd()
 });
 
 pythonProcess.on('error', (err) => {
@@ -67,8 +77,7 @@ app.use(express.urlencoded({ extended: false }));
   httpServer.listen(
     {
       port,
-      host: "0.0.0.0",
-      reusePort: true,
+      host: "127.0.0.1",
     },
     () => {
       log(`serving on port ${port}`);
