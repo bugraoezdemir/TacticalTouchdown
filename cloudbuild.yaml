@@ -21,7 +21,7 @@ steps:
       - 'run'
       - '--filename=.'
       - '--image=gcr.io/$PROJECT_ID/tactical-touchdown:latest'
-      - '--location=us-central1'
+      - '--location=europe-west3'
       - '--output=/workspace/output'
 
   # Deploy using gcloud
@@ -33,7 +33,7 @@ steps:
       - '--image'
       - 'gcr.io/$PROJECT_ID/tactical-touchdown:latest'
       - '--region'
-      - 'us-central1'
+      - 'europe-west3'
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
@@ -48,3 +48,4 @@ images:
 
 options:
   machineType: 'N1_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
