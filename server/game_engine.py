@@ -451,12 +451,20 @@ def validate_pass(passer_pos, target_pos, passer_team, opponent_positions,
     # - PERPENDICULAR distance (opponent to path) = opponent sprint time
     # If opponent can sprint perpendicular faster than ball travels along path → interception
     
-    ball_travel_time = pass_dist / ball_speed
+    # FRICTION CORRECTION: Ball slows down due to BALL_FRICTION (0.95 per tick)
+    # This means the ball takes longer to arrive than constant-speed calculation suggests
+    # Apply a conservative slowdown factor to account for deceleration
+    # At 10 ticks/sec with friction 0.95: after 1 second, speed is ~0.6x original
+    # Average effective speed is roughly 0.75-0.8x the initial speed
+    FRICTION_SLOWDOWN_FACTOR = 0.7  # Conservative - ball is effectively 70% as fast
+    effective_ball_speed = ball_speed * FRICTION_SLOWDOWN_FACTOR
+    
+    ball_travel_time = pass_dist / effective_ball_speed
     min_margin = float('inf')
     worst_interceptor_dist = float('inf')
     
     # Interception radius - opponent can stick out leg/body to intercept
-    INTERCEPT_RADIUS = 1.5  # units (player can reach ball within this distance)
+    INTERCEPT_RADIUS = 2.0  # units (increased - player reach + reaction)
     
     # Normalize pass direction
     pass_dir = pass_vec / pass_dist
@@ -472,10 +480,10 @@ def validate_pass(passer_pos, target_pos, passer_team, opponent_positions,
         along_dist = np.linalg.norm(closest_on_path - passer_pos)
         
         # TRIANGLE MODEL:
-        # Ball time = along_dist / ball_speed (time for ball to reach intercept point)
+        # Ball time = along_dist / effective_ball_speed (accounting for friction)
         # Opponent time = perp_dist / sprint_speed (time for opponent to reach path)
         
-        ball_time_at_intercept = along_dist / ball_speed
+        ball_time_at_intercept = along_dist / effective_ball_speed
         
         # If opponent is IN the lane (blocking), immediate rejection
         if perp_dist < INTERCEPT_RADIUS:
