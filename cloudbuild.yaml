@@ -47,5 +47,5 @@ images:
   - 'gcr.io/$PROJECT_ID/tactical-touchdown:$COMMIT_SHA'
 
 options:
-  machineType: 'N1_HIGHCPU_8'
+  machineType: 'E2_HIGHCPU_8'
   logging: CLOUD_LOGGING_ONLY
