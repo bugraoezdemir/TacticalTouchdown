@@ -8,6 +8,7 @@ same scale, and compared directly.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -85,6 +86,10 @@ from .playmaking import find_signal_target
 from . import pace as _pace
 
 ActionKind = Literal["shot", "pass", "dribble", "hold"]
+
+# A/B switch (on); 0 restores the race to his own touch that ignores how he is
+# moving when he plays it.
+OWN_MOMENTUM = os.environ.get("FB_OWN_MOMENTUM", "1") != "0"
 
 # 8 candidate dribble directions at 45 degree increments.
 _DRIBBLE_ANGLES = [i * math.pi / 4 for i in range(8)]
@@ -488,9 +493,19 @@ def _on_pitch_mask(spots: np.ndarray) -> np.ndarray:
 
 def _touch_race(player: Player, lengths: np.ndarray, spots: np.ndarray,
                 opponents: "list[Player]") -> np.ndarray:
-    """P(he gets to his own ball first), per touch length."""
+    """P(he gets to his own ball first), per touch length.
+
+    Each side from how it is moving now. His touch cadence alone left his run
+    out of it: at speed a touch back the way he came was thought 93% safe,
+    kept 48%, and he reached it 29 ticks late, because he had to stop first.
+    """
     reach = OUTFIELD_CONTROL_RADIUS
     t_me = np.array([_touch_ticks(player, float(L)) * max(0.0, L - reach) / L for L in lengths])
+    if OWN_MOMENTUM and kinematics.INERTIA:
+        t_me = np.maximum(t_me, reach_ticks(
+            player.pos[None, None, :], player.velocity[None, None, :],
+            np.array([[dribble_top_speed(player)]]), spots[:, None, :], reach,
+        )[:, 0])
     outfield = [o for o in opponents if o.speed > 1e-9]
     if outfield:
         P = np.array([o.pos for o in outfield]); S = np.array([o.speed for o in outfield])

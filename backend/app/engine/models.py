@@ -100,6 +100,9 @@ class Player:
     # The meeting point he has committed to while running onto a pass. Held
     # across ticks so re-solving cannot jitter him -- see off_ball.
     meet_target: "np.ndarray | None" = None
+    # The strike (Ball.struck_tick) of the pass he has seen is in danger and
+    # gone to meet: once he goes he stays gone -- see off_ball._comes_to_ball.
+    coming_to_strike: int = -2
     # Consecutive ticks he has chosen to hold the ball. Updated in APPLY, read
     # by the next tick's decision: holding is a short wait for something to
     # open up, and its value decays the longer it goes on.
@@ -395,6 +398,10 @@ class GameState:
     # happened. The frontend previously had to guess at goals from ball
     # position, which missed some and invented others.
     events: list[MatchEvent] = field(default_factory=list)
+    # The back caller's shape call per team id, in force and on its way
+    # (decisions.shape_call). Written in APPLY only.
+    shape_calls: dict = field(default_factory=dict)
+    shape_calls_waiting: dict = field(default_factory=dict)
 
     def add_event(
         self,

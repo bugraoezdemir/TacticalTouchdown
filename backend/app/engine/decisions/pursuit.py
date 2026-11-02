@@ -26,11 +26,13 @@ prediction", and it is derived from three things:
 from __future__ import annotations
 
 import math
+import os
 from typing import Sequence
 
 import numpy as np
 
 from ..constants import (
+    COME_TO_BALL_MARGIN,
     PRESSING_LAMBDA_WEIGHT,
     MIN_SUPPORT_PASS_DIST,
     PITCH_LENGTH,
@@ -58,6 +60,10 @@ from ..kinematics import reach_ticks
 from ..models import GameState, Player
 
 _EPS = 1e-9
+
+# A/B switch (on); 0 restores the receiver who keeps to his timed run whoever
+# is closing on the ball.
+COME_TO_BALL = os.environ.get("FB_COME_TO_BALL", "1") != "0"
 
 
 def prediction_confidence(
@@ -170,6 +176,7 @@ def ball_intercept_point(
     max_ticks: int = 120,
     height: float = 0.0,
     vz: float = 0.0,
+    reach: float = 0.0,
 ) -> tuple[np.ndarray, float]:
     """Earliest point on the ball's own trajectory the chaser can reach.
 
@@ -180,6 +187,11 @@ def ball_intercept_point(
     resting place if they cannot catch it at all.
 
     A ball in the air is met only where it has come down within his reach.
+
+    `reach`: how close he must get. Getting exactly ONTO the path is later,
+    and for a ball going past him at twice his pace much later: the answer
+    slides on down the path with the ball and he runs alongside it, 2 m away,
+    without ever putting a foot out.
     """
     from ..ball_physics import travel_distance
 
@@ -191,12 +203,13 @@ def ball_intercept_point(
             key, lambda: trajectory(ball_pos, ball_velocity, height, vz, friction, max_ticks),
         )
         ts = np.arange(1, max_ticks + 1, dtype=float)
-        reach = GK_REACH_HEIGHT if chaser.position == "GK" else HEADER_HEIGHT
+        up = GK_REACH_HEIGHT if chaser.position == "GK" else HEADER_HEIGHT
         if kinematics.INERTIA:
-            need = reach_ticks(chaser.pos, chaser.velocity, chaser.speed, path)
+            need = reach_ticks(chaser.pos, chaser.velocity, chaser.speed, path, reach)
         else:
-            need = np.hypot(path[:, 0] - chaser.pos[0], path[:, 1] - chaser.pos[1]) / chaser.speed
-        low = (hs <= reach) if chaser.position == "GK" else within_reach(height, hs, reach)
+            need = np.maximum(0.0, np.hypot(path[:, 0] - chaser.pos[0], path[:, 1] - chaser.pos[1])
+                              - reach) / chaser.speed
+        low = (hs <= up) if chaser.position == "GK" else within_reach(height, hs, up)
         ok = np.nonzero((need <= ts) & low)[0]
         if ok.size:
             i = int(ok[0])
@@ -219,7 +232,7 @@ def ball_intercept_point(
         key = ("roll", float(ball_pos[0]), float(ball_pos[1]), float(ball_velocity[0]),
                float(ball_velocity[1]), friction, max_ticks)
         path = _shared_path(key, build)
-        need = reach_ticks(chaser.pos, chaser.velocity, chaser.speed, path)
+        need = reach_ticks(chaser.pos, chaser.velocity, chaser.speed, path, reach)
         ok = np.nonzero(need <= ts)[0]
         if ok.size:
             i = int(ok[0])
@@ -229,7 +242,7 @@ def ball_intercept_point(
             travelled = travel_distance(speed, friction, t)
             x = float(ball_pos[0]) + float(direction[0]) * travelled
             y = float(ball_pos[1]) + float(direction[1]) * travelled
-            if math.hypot(x - px, y - py) <= chaser.speed * t:
+            if math.hypot(x - px, y - py) - reach <= chaser.speed * t:
                 return np.array([x, y]), float(t)
 
     # Cannot catch it in flight: aim for where it comes to rest.
@@ -238,6 +251,57 @@ def ball_intercept_point(
     rest = carry_distance(speed, friction)
     end = ball_pos + direction * rest
     return end, float(max_ticks)
+
+
+def closing_on_path(
+    ball_pos: np.ndarray,
+    ball_velocity: np.ndarray,
+    friction: float,
+    opponents: "Sequence[Player]",
+    from_tick: int,
+    until_tick: float,
+    height: float = 0.0,
+    vz: float = 0.0,
+) -> bool:
+    """Is an opponent getting too close to this ball on its way?
+
+    From `from_tick` to `until_tick` ticks ahead: can anyone reach the ball's
+    path, within his control radius and from how he is moving, in the ball's
+    own time there plus COME_TO_BALL_MARGIN of it? In the air, only where it
+    has come down within his reach.
+    """
+    from ..ball_physics import travel_distance
+    from .interception import control_radius
+
+    last = int(math.ceil(until_tick))
+    outfield = [o for o in opponents if o.speed > 1e-9]
+    if last < from_tick or not outfield:
+        return False
+    ts = np.arange(1, last + 1, dtype=float)
+    low = None
+    if airborne(height, vz):
+        key = ("flight", float(ball_pos[0]), float(ball_pos[1]), float(ball_velocity[0]),
+               float(ball_velocity[1]), height, vz, friction, last)
+        path, hs = _shared_path(
+            key, lambda: trajectory(ball_pos, ball_velocity, height, vz, friction, last),
+        )
+        low = np.array([hs <= GK_REACH_HEIGHT if o.position == "GK"
+                        else within_reach(height, hs, HEADER_HEIGHT) for o in outfield]).T
+    else:
+        speed = math.hypot(float(ball_velocity[0]), float(ball_velocity[1]))
+        if speed < _EPS:
+            return False
+        along = np.array([travel_distance(speed, friction, float(t)) for t in ts])
+        path = ball_pos[None, :] + np.outer(along, normalize(ball_velocity))
+    P = np.array([o.pos for o in outfield])
+    V = np.array([o.velocity for o in outfield])
+    S = np.array([o.speed for o in outfield])
+    ctrl = np.array([control_radius(o) for o in outfield])
+    need = reach_ticks(P[None, :, :], V[None, :, :], S[None, :], path[:, None, :], ctrl[None, :])
+    close = need <= ts[:, None] * (1.0 + COME_TO_BALL_MARGIN)
+    if low is not None:
+        close &= low
+    return bool(close[from_tick - 1:].any())
 
 
 def support_need(best_pass_safety: float) -> float:

@@ -23,6 +23,8 @@ import numpy as np
 
 from ..constants import SUPPORT_BEHIND_MARGIN, SUPPORT_SPRINT_GAP, TIMED_RUN_EARLY_TICKS, TIMED_RUN_MIN_SHARE
 from ..constants import (
+    COME_TO_BALL_FROM_TICKS,
+    COME_TO_BALL_HORIZON,
     BALL_FRICTION_COEFF,
     FUNNEL_MAX,
     FUNNEL_POWER,
@@ -141,11 +143,14 @@ from . import pace as _pace
 from . import tick_cache
 from .interception import control_radius, route_survival, route_survival_many
 from .marginal import marginal_contribution
+from .shape_call import SHAPE_CALL, ShapeCall, called_station
 from .pursuit import (
+    COME_TO_BALL,
     _comfortably_ours,
     aim_point,
     best_meeting_point,
     best_pass_safety,
+    closing_on_path,
     space_quality,
     support_need,
     ball_intercept_point,
@@ -278,6 +283,12 @@ def off_ball_decision(
         action = _intercept_action(player, state.ball)
         if action is not None:
             return action
+
+    # A pass in flight FOR HIM with an opponent getting too close to it: first,
+    # before any plan for the point it was played to.
+    coming = _comes_to_ball(player, state, team)
+    if coming is not None:
+        return coming
 
     # A pass in flight FOR HIM, into space or to where his run takes him:
     # under grip he times his run to the point it was played to (_timed_run),
@@ -710,6 +721,72 @@ def _collect_own_pass(player: Player, state: GameState, team: Team) -> OffBallAc
     return OffBallAction(_clamp_to_pitch(meet), sprint=True, through=True)
 
 
+def _comes_to_ball(player: Player, state: GameState, team: Team) -> OffBallAction | None:
+    """The pass is for him and an opponent is getting too close to it, so he
+    stops waiting for it and goes to meet it: flat out to the earliest point
+    of its path he can reach. Common sense, and it is what the passer planned
+    on: _reception_probability races him to that same earliest point.
+
+    Everywhere else he times his run or stands on the spot, and the only
+    question those ask is whether the POINT is contested: a slow ball cut out
+    on its way there was nobody's business. A ball past its point is watched
+    all the way to where it stops, or he lets it run on until a man arrives.
+    Once he goes he stays gone for this pass, whatever the opponent does next.
+    None if the pass is not his, or it is not in danger.
+    """
+    ball = state.ball
+    if not (
+        COME_TO_BALL
+        and ball.state == "in_pass"
+        and ball.owner_id is None
+        and ball.intended_receiver_id == player.player_id
+        and ball.last_toucher_team_id == team.team_id
+    ):
+        return None
+    friction = _ball_friction(ball)
+    if player.coming_to_strike != ball.struck_tick:
+        arrival = _pass_arrival(ball, friction)
+        since = state.tick - ball.struck_tick
+        if not closing_on_path(
+            ball.pos, ball.velocity, friction, state.opponents_of(team.team_id),
+            max(1, COME_TO_BALL_FROM_TICKS - since),
+            arrival[1] if arrival is not None else COME_TO_BALL_HORIZON,
+            height=ball.height, vz=ball.vz,
+        ):
+            return None
+        player.coming_to_strike = ball.struck_tick
+    point, _ = ball_intercept_point(
+        ball.pos, ball.velocity, friction, player, height=ball.height, vz=ball.vz,
+        reach=control_radius(player),
+    )
+    return OffBallAction(_clamp_to_pitch(point), sprint=True, through=True)
+
+
+def _pass_arrival(ball: Ball, friction: float) -> tuple[np.ndarray, float] | None:
+    """The pass point, moved onto where the ball is ACTUALLY going (the strike
+    is never perfect), and in how many ticks the ball gets there. None if it
+    has no point, has stopped or has gone past it."""
+    from ..ball_physics import carry_distance
+
+    if ball.pass_target is None:
+        return None
+    speed = float(np.linalg.norm(ball.velocity))
+    if speed < 1e-9:
+        return None
+    direction = ball.velocity / speed
+    along = float(np.dot(ball.pass_target - ball.pos, direction))
+    if along <= 0.0:
+        return None                          # it has gone past the point
+    if airborne(ball.height, ball.vz):
+        t_ball = along / speed               # no rolling resistance in the air
+    else:
+        along = min(along, carry_distance(speed, friction) * 0.98)
+        t_ball = travel_ticks(speed, friction, along)
+    if not math.isfinite(t_ball):
+        return None
+    return _clamp_to_pitch(ball.pos + direction * along), t_ball
+
+
 def _timed_run(player: Player, state: GameState) -> OffBallAction | None:
     """Go to the pass point at the pace that arrives just before the ball.
 
@@ -721,29 +798,10 @@ def _timed_run(player: Player, state: GameState) -> OffBallAction | None:
     before) when the point is contested, he cannot make it with time to
     spare, or the ball is in the air.
     """
-    from ..ball_physics import carry_distance
-
-    ball = state.ball
-    if ball.pass_target is None:
+    arrival = _pass_arrival(state.ball, _ball_friction(state.ball))
+    if arrival is None:
         return None
-    speed = float(np.linalg.norm(ball.velocity))
-    if speed < 1e-9:
-        return None
-    direction = ball.velocity / speed
-    friction = _ball_friction(ball)
-    # The pass point, moved onto where the ball is ACTUALLY going (the strike
-    # is never perfect), and when the ball gets there.
-    along = float(np.dot(ball.pass_target - ball.pos, direction))
-    if along <= 0.0:
-        return None                          # it has gone past the point
-    if airborne(ball.height, ball.vz):
-        t_ball = along / speed               # no rolling resistance in the air
-    else:
-        along = min(along, carry_distance(speed, friction) * 0.98)
-        t_ball = travel_ticks(speed, friction, along)
-    point = _clamp_to_pitch(ball.pos + direction * along)
-    if not math.isfinite(t_ball):
-        return None
+    point, t_ball = arrival
     reach = control_radius(player)
     if distance(player.pos, point) <= reach:
         # There: settle and wait for it.
@@ -1396,6 +1454,10 @@ def _zone_centre_compute(
     back behind it on a recovery run. Separate from _hold_shape so zonal
     marking can work out EVERY teammate's zone, not just his own.
     """
+    if SHAPE_CALL and not _we_have_the_ball(state, team):
+        call = state.shape_calls.get(team.team_id)
+        if call is not None:
+            return _called_centre(player, state, team, call)
     anchor = _shape_anchor(player, state.ball, team, state)
     # Depth: symmetric about neutral: above 1.0 a player drifts toward the ball,
     # below it he sits deeper than his station and stays compact. (This was
@@ -1479,6 +1541,21 @@ def _zone_centre_compute(
                     anchor = anchor - lateral / off * ((off - width) * strength)
             anchor = _clamp_to_pitch(anchor)
     return _not_too_deep(anchor, state, team), recovering
+
+
+def _called_centre(
+    player: Player, state: GameState, team: Team, call: ShapeCall
+) -> tuple[np.ndarray, bool]:
+    """The middle of his ground under the back caller's call: his station, held
+    onside, with Depth's drift toward the ball on top. He is recovering while
+    he is upfield of it."""
+    station = called_station(player, call, team, state.tick)
+    anchor = _hold_onside(station, onside_limit(state, team), team.direction)
+    pull = (offensiveness_bias(player, team) - 1.0) * HOLD_BALL_PULL
+    pull = min(HOLD_BALL_PULL_MAX, max(-HOLD_BALL_PULL_MAX, pull))
+    if abs(pull) > 1e-9:
+        anchor = _clamp_to_pitch(anchor + (state.ball.pos - anchor) * pull)
+    return anchor, (float(player.pos[0]) - float(anchor[0])) * team.direction > 0.0
 
 
 def _not_too_deep(anchor: np.ndarray, state: GameState, team: Team) -> np.ndarray:

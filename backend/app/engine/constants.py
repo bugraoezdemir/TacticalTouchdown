@@ -229,6 +229,16 @@ CORNER_MIN_SHARE    = 0.3
 # balanced, not flat out -- but never slower than TIMED_RUN_MIN_SHARE of top.
 TIMED_RUN_EARLY_TICKS = 6
 TIMED_RUN_MIN_SHARE   = 0.25
+# ...but the point is not all he watches. If an opponent could reach the ball's
+# path within COME_TO_BALL_MARGIN of the ball's own time to that spot, on any
+# part of the path before the ball gets to him, he stops waiting and goes to
+# meet it (off_ball._comes_to_ball). A share, not ticks: near the kicker's foot
+# a tick or two is all that separates a man the ball is leaving behind from one
+# it runs into. The first COME_TO_BALL_FROM_TICKS after the strike do not
+# count: the man pressing the passer stands on that part of every path.
+COME_TO_BALL_MARGIN     = 0.3
+COME_TO_BALL_FROM_TICKS = 6
+COME_TO_BALL_HORIZON    = 120   # ticks ahead watched once it is past its point
 # The passer plays a moving teammate where his run takes him (to-feet and
 # lofted balls), if he is running faster than LEAD_MIN_SPEED_SHARE of his top
 # speed; at most LEAD_MAX_TICKS of his run ahead.
@@ -410,6 +420,28 @@ RECOVER_TRIANGLE_MARGIN = 2.0   # m
 LINE_SHARE       = 0.60
 LINE_FADE_FAR    = 55.0   # m
 STATION_MIN_FROM_GOAL = 2.0   # m; never stationed in the goal mouth itself
+# The back caller's shape call (decisions.shape_call). Made every SHAPE_CALL_TICKS,
+# sooner if the ball has moved SHAPE_CALL_BALL_M, and heard SHAPE_CALL_HEAR_TICKS
+# later. Stations re-decided every tick changed a defender's job 31.6 times a
+# minute, 35% of them undone within half a second.
+SHAPE_CALL_TICKS     = 30      # ticks
+SHAPE_CALL_MIN_TICKS = 10      # ticks
+SHAPE_CALL_BALL_M    = 8.0     # m
+SHAPE_CALL_HEAR_TICKS = 6      # ticks
+SHAPE_CALL_EASE_TICKS = 24     # ticks for the team to move onto a call it has heard
+SHAPE_CALL_OUTLET_KEEP_M = 5.0 # m; the outlet stays his while within this of the highest man
+# Its shape. The deepest slot is never nearer our goal line than BLOCK_LINE_MIN.
+# The outfielder of rank BLOCK_FRONT_RANK (0 = deepest) fits in behind the ball,
+# so only the men in front of him stay ahead of it, but the formation keeps at
+# least BLOCK_LENGTH_MIN of its length. Width narrows to BLOCK_WIDTH_MIN from
+# BLOCK_SQUEEZE_FAR in to DANGER_FAR, which takes centre-backs 14 m apart to 10 m.
+# Only BLOCK_ACROSS_NEAR of the sideways slide applies with the ball at our line.
+BLOCK_LINE_MIN    = 6.0        # m
+BLOCK_FRONT_RANK  = 7
+BLOCK_LENGTH_MIN  = 0.35
+BLOCK_WIDTH_MIN   = 0.72
+BLOCK_SQUEEZE_FAR = 70.0       # m
+BLOCK_ACROSS_NEAR = 0.5
 # Closing down the carrier under inertia: the arrive time constant, in taus.
 # 1.0 brakes late (a little overshoot is contact, not a fault); the 2.0 used to
 # settle on a fixed spot reached him at walking pace.

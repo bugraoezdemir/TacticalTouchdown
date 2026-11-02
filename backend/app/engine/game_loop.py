@@ -5,6 +5,7 @@ import numpy as np
 from .decisions.off_ball import OffBallAction, off_ball_decision
 from .decisions.on_ball import OnBallAction, on_ball_decision
 from .decisions.playmaking import choose_attack_runners
+from .decisions.shape_call import update_shape_calls
 from .formations import apply_formation
 from .geometry import normalize
 from .models import GameState, Player
@@ -354,6 +355,8 @@ def tick(state: GameState) -> GameState:
             for runner_id in attack_runners:
                 emit_attack_call(state, attack_caller_id, runner_id)
 
+    update_shape_calls(state)
+
     clamp_players_to_pitch(state)
     state.tick += 1
     return state
@@ -370,6 +373,8 @@ def _half_time(state: GameState) -> None:
     The team that did NOT kick off the match kicks off the second half.
     """
     state.half = 2
+    state.shape_calls.clear()
+    state.shape_calls_waiting.clear()
     for team in (state.home_team, state.away_team):
         team.direction *= -1
         apply_formation(team)
