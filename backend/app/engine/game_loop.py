@@ -210,7 +210,8 @@ def tick(state: GameState) -> GameState:
             )
             # Lofted, or headed on from the height he met it at; else along
             # the ground.
-            state.ball.vz = action.vz
+            state.ball.vz = (_lift_error(action.vz, player, state)
+                             if action.action_type == "shot" and action.vz > 0.0 else action.vz)
             state.ball.height = (player.first_touch_height
                                  if player.first_touch_height > CONTROL_HEIGHT else 0.0)
             # Whatever he did with it, the first touch has been taken.
@@ -422,7 +423,8 @@ def _shot_is_on_target(state: GameState, shooter: Player) -> bool:
     keeper then saves it is a separate question -- an on-target shot is one he
     has to deal with.
     """
-    from .constants import GOAL_BOTTOM_Y, GOAL_TOP_Y, LEFT_GOAL_X, RIGHT_GOAL_X
+    from .ball_flight import height_after
+    from .constants import CROSSBAR_HEIGHT, GOAL_BOTTOM_Y, GOAL_TOP_Y, LEFT_GOAL_X, RIGHT_GOAL_X
 
     team = state.get_team(shooter.team_id)
     goal_x = RIGHT_GOAL_X if team.direction == 1 else LEFT_GOAL_X
@@ -433,7 +435,18 @@ def _shot_is_on_target(state: GameState, shooter: Player) -> bool:
     if ticks <= 0.0:
         return False  # struck away from the goal
     y = float(state.ball.pos[1]) + float(state.ball.velocity[1]) * ticks
-    return GOAL_TOP_Y <= y <= GOAL_BOTTOM_Y
+    if not GOAL_TOP_Y <= y <= GOAL_BOTTOM_Y:
+        return False
+    return height_after(state.ball.height, state.ball.vz, ticks) <= CROSSBAR_HEIGHT
+
+
+def _lift_error(vz: float, player: Player, state: GameState) -> float:
+    """A lofted shot's lift, as struck: off by a skill-scaled share, which is
+    what puts one over the bar. Noise on execution, as for the aim."""
+    from .constants import SHOT_LIFT_ERROR_MAX
+
+    quality = min(1.0, max(0.0, player.shooting / 100.0))
+    return vz * max(0.0, 1.0 + float(state.rng.normal(0.0, SHOT_LIFT_ERROR_MAX * (1.0 - quality))))
 
 
 def _apply_player_movement(player: Player, action: OffBallAction | OnBallAction) -> None:
@@ -489,7 +502,7 @@ def _apply_inertial_movement(player: Player, action: OffBallAction | OnBallActio
         # acceleration ramp -- the same instant step the old movement used.
         offset = target - player.pos
         dist = float(np.linalg.norm(offset))
-        step = min(dist, player.speed)
+        step = min(dist, player.speed if action.pace is None else action.pace)
         player.velocity = offset / dist * step if dist > 1e-9 else np.zeros(2)
         player.pos = player.pos + player.velocity
         player.prev_move_target = None

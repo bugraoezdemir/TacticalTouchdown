@@ -122,6 +122,40 @@ def height_at(vz0: float, t: float) -> float:
     return vz0 * t - BALL_GRAVITY * t * (t + 1.0) / 2.0
 
 
+def height_after(height: float, vz: float, t: float) -> float:
+    """Height t ticks on, for a ball at `height` rising at `vz` now; below 0
+    means it has landed first."""
+    return height + vz * t - BALL_GRAVITY * t * (t + 1.0) / 2.0
+
+
+def drive_launch(dist: float, height: float, pace: float) -> tuple[float, float, float]:
+    """(horizontal speed, vz0, ticks) for a ball struck at `pace` (3-D) that is
+    at `height` when it has gone `dist` metres. Twice round, because the lift
+    takes a little from the horizontal speed that fixes how long it needs."""
+    vh = pace
+    for _ in range(2):
+        T = dist / vh
+        vz0 = (height + BALL_GRAVITY * T * (T + 1.0) / 2.0) / T
+        vh = math.sqrt(max(pace * pace - vz0 * vz0, 1e-9))
+    return vh, vz0, dist / vh
+
+
+def chip_launch(dist: float, height: float, angle_deg: float, pace: float) -> tuple[float, float, float] | None:
+    """(horizontal speed, vz0, ticks) for a ball going up at `angle_deg` that
+    is at `height`, coming down, when it has gone `dist` metres. None if that
+    needs more than `pace` (3-D). From tan(angle) = vz0 / vh, with vh = dist/T
+    and height_at(vz0, T) = height."""
+    span = dist * math.tan(math.radians(angle_deg)) - height
+    if span <= _EPS:
+        return None
+    T = (-1.0 + math.sqrt(1.0 + 8.0 * span / BALL_GRAVITY)) / 2.0
+    vh = dist / T
+    vz0 = (height + BALL_GRAVITY * T * (T + 1.0) / 2.0) / T
+    if math.hypot(vh, vz0) > pace:
+        return None
+    return vh, vz0, T
+
+
 def flight_ticks(vz0: float) -> float:
     """Ticks from a launch at vz0 to landing."""
     return max(0.0, 2.0 * vz0 / BALL_GRAVITY - 1.0)

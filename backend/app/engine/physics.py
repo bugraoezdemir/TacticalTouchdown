@@ -186,7 +186,7 @@ def resolve_possession(state: GameState) -> None:
                 continue
             if ball.height > GK_REACH_HEIGHT:
                 continue   # over his hands
-            if _segment_gap(keeper.pos, prev, ball.pos) > control_radius_of(keeper):
+            if _segment_gap(keeper.pos, prev, ball.pos) > keeper_reach(keeper, ball.height):
                 continue
             # ...and he cannot re-gather the ball he has just distributed. The
             # gather threshold is above a pass's launch speed (it has to be, or
@@ -274,7 +274,8 @@ def resolve_possession(state: GameState) -> None:
             # (interception.control_radius). Capturing only within 0.51 m while
             # decisions assumed 1.0 m had players move to exactly where they
             # planned to take a ball and watch it roll past them.
-            if d < control_radius_of(player):
+            reach = keeper_reach(player, ball.height) if player.position == "GK" else control_radius_of(player)
+            if d < reach:
                 on_ball.append((player, d))
 
         if blockers:
@@ -782,6 +783,11 @@ def _record_goal(state: GameState, conceding_goal_x: float) -> None:
     if own_goal:
         detail += " (own goal)"
     state.add_event("goal", scoring_team_id, scorer_name, detail)
+
+
+def keeper_reach(keeper: Player, height: float) -> float:
+    from .decisions.interception import keeper_reach as reach
+    return reach(keeper, height)
 
 
 def control_radius_of(player: Player) -> float:

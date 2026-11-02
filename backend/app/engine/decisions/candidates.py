@@ -73,7 +73,7 @@ from ..constants import (
     LOFT_SPEED_MAX,
 )
 from .. import kinematics
-from ..ball_flight import loft_launch
+from ..ball_flight import chip_launch, drive_launch, loft_launch
 from ..kinematics import reach_distance, reach_ticks
 from ..offside import is_offside_position
 from ..ball_physics import nominal_pass_speed, speed_for_arrival, travel_ticks, weighted_speed
@@ -90,6 +90,8 @@ ActionKind = Literal["shot", "pass", "dribble", "hold"]
 # A/B switch (on); 0 restores the race to his own touch that ignores how he is
 # moving when he plays it.
 OWN_MOMENTUM = os.environ.get("FB_OWN_MOMENTUM", "1") != "0"
+# A/B switch (on); 0 restores shots along the ground only.
+LOFTED_SHOTS = os.environ.get("FB_LOFTED_SHOTS", "1") != "0"
 
 # 8 candidate dribble directions at 45 degree increments.
 _DRIBBLE_ANGLES = [i * math.pi / 4 for i in range(8)]
@@ -153,6 +155,8 @@ def build_candidates(player: Player, state: GameState) -> list[Candidate]:
             kind="shot", target=np.array([attacking_goal_x, y]),
             speed=SHOT_SPEED, friction=SHOT_FRICTION_COEFF,
         ))
+        if LOFTED_SHOTS and player.position != "GK":
+            out.extend(_lofted_shots(player, np.array([attacking_goal_x, y]), corner=y != GOAL_CENTER_Y))
 
     # ── Passes: direct and runway, each at both speeds ───────────────────────
     # Offering both speeds matters now that PASS_SPEED_LOW genuinely cannot
@@ -312,6 +316,34 @@ def build_candidates(player: Player, state: GameState) -> list[Candidate]:
             kind="hold", target=player.pos.copy(), speed=0.0, friction=BALL_FRICTION_COEFF,
         ))
     return out
+
+
+def _lofted_shots(player: Player, target: np.ndarray, corner: bool) -> "list[Candidate]":
+    """The shot for the top corner, if this aim point is a `corner`, and the
+    chip, each if it is in range. `speed` is the ball's horizontal pace, as
+    for any lofted ball, and the height is for the metres the ball has left
+    once it is off his foot."""
+    from ..constants import (
+        CAPTURE_RADIUS,
+        CHIP_ANGLE_DEG,
+        CHIP_HEIGHT,
+        CHIP_MAX_DIST,
+        LOFT_SHOT_MAX_DIST,
+        LOFT_SHOT_MIN_DIST,
+        SHOT_FRICTION_COEFF,
+        TOP_CORNER_HEIGHT,
+    )
+
+    dist = float(np.linalg.norm(target - player.pos))
+    if not LOFT_SHOT_MIN_DIST <= dist <= LOFT_SHOT_MAX_DIST:
+        return []
+    launches = []
+    if corner:
+        launches.append(drive_launch(dist - SHOT_SPEED, TOP_CORNER_HEIGHT, SHOT_SPEED))
+    if dist <= CHIP_MAX_DIST:
+        launches.append(chip_launch(dist - CAPTURE_RADIUS - 0.3, CHIP_HEIGHT, CHIP_ANGLE_DEG, SHOT_SPEED))
+    return [Candidate(kind="shot", target=target, speed=launch[0], friction=SHOT_FRICTION_COEFF, vz=launch[1])
+            for launch in launches if launch is not None]
 
 
 def _moving(mate: Player) -> bool:

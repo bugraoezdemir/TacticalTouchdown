@@ -25,6 +25,11 @@ from ..constants import SUPPORT_BEHIND_MARGIN, SUPPORT_SPRINT_GAP, TIMED_RUN_EAR
 from ..constants import (
     COME_TO_BALL_FROM_TICKS,
     COME_TO_BALL_HORIZON,
+    CROSSBAR_HEIGHT,
+    GK_DIVE_SPEED,
+    GK_HIGH_SHOT,
+    GK_LEAVE_OVER_BAR,
+    GK_REACTION_TICKS,
     BALL_FRICTION_COEFF,
     FUNNEL_MAX,
     FUNNEL_POWER,
@@ -132,7 +137,7 @@ from ..constants import (
     TICK_RATE,
 )
 from .. import kinematics
-from ..ball_flight import airborne, trajectory, within_reach
+from ..ball_flight import airborne, height_after, trajectory, within_reach
 from ..geometry import distance, normalize
 from ..kinematics import reach_ticks
 from ..offside import offside_line, onside_limit
@@ -141,7 +146,7 @@ from ..ball_physics import nominal_pass_speed, travel_ticks
 from .candidates import dribble_top_speed
 from . import pace as _pace
 from . import tick_cache
-from .interception import control_radius, route_survival, route_survival_many
+from .interception import caught_out, control_radius, route_survival, route_survival_many
 from .marginal import marginal_contribution
 from .shape_call import SHAPE_CALL, ShapeCall, called_station
 from .pursuit import (
@@ -2122,6 +2127,16 @@ def _gk_decision(
         if crossing_y is not None:
             target_y = float(np.clip(crossing_y, GOAL_TOP_Y - 1.0, GOAL_BOTTOM_Y + 1.0))
             target = np.array([own_goal_x + 0.5 * team.direction, target_y])
+            if airborne(ball.height, ball.vz) and caught_out(player.pos, own_goal_x):
+                # Going over his head: a dive will not take him back to his
+                # line. He stops, turns and runs like anyone else.
+                return OffBallAction(target, sprint=True, through=True)
+            if _crossing_height(ball, own_goal_x) > GK_HIGH_SHOT:
+                # Up under the bar he cannot run across and take it: he reads
+                # it, then leaps, and the far top corner may be too far.
+                if state.tick - ball.struck_tick < GK_REACTION_TICKS:
+                    return OffBallAction(player.pos.copy(), sprint=False, dive=True, pace=0.0)
+                return OffBallAction(target, sprint=True, dive=True, pace=GK_DIVE_SPEED)
             return OffBallAction(target, sprint=True, dive=True)
 
     if ball.owner_id is None and distance(ball.pos, player.pos) < 10.0:
@@ -2166,7 +2181,14 @@ def _predict_goal_crossing_y(ball: Ball, goal_x: float) -> float | None:
     t = (goal_x - ball.pos[0]) / vx
     if t < 0:
         return None
+    if _crossing_height(ball, goal_x) > CROSSBAR_HEIGHT + GK_LEAVE_OVER_BAR:
+        return None                          # going over: he leaves it
     return float(ball.pos[1] + ball.velocity[1] * t)
+
+
+def _crossing_height(ball: Ball, goal_x: float) -> float:
+    """How high the ball is when it reaches the line; below 0, it has landed."""
+    return height_after(ball.height, ball.vz, float((goal_x - ball.pos[0]) / ball.velocity[0]))
 
 
 def _shot_threatens(ball: Ball, own_goal_x: float) -> bool:

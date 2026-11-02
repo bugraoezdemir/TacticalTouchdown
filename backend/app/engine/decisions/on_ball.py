@@ -63,17 +63,25 @@ from ..constants import (
 )
 from ..constants import CONTROL_HEIGHT, CROSS_FINISH_FACTOR, GK_REACH_HEIGHT, HEADER_HEIGHT
 from ..constants import CROSS_FREE_FLOOR, CROSS_FREE_TAU
+from ..constants import CROSSBAR_HEIGHT, GOAL_BOTTOM_Y, GOAL_TOP_Y, LOFT_ANGLE_ERROR_GAIN, LOFT_SHOT_VALUE
+from ..constants import SHOT_ERROR_MAX_RAD, SHOT_LIFT_ERROR_MAX
 from ..constants import DIRECT_RUN_M
 from ..constants import IDLE_FREE_TICKS, IDLE_GAIN_MAX, IDLE_MAX_TICKS, IDLE_MIN_GAP, IDLE_PACE_SHARE
 from .. import kinematics
-from ..ball_flight import trajectory, within_reach
+from ..ball_flight import height_after, trajectory, within_reach
 from ..ball_physics import nominal_pass_speed, travel_ticks
 from ..geometry import distance, normalize
 from ..kinematics import reach_ticks
 from ..models import GameState, Player
 from . import pace as _pace
 from .candidates import Candidate, build_candidates
-from .interception import control_radius, lofted_survival, route_survival, route_survival_many
+from .interception import (
+    control_radius,
+    lofted_shot_survival,
+    lofted_survival,
+    route_survival,
+    route_survival_many,
+)
 from .tunables import (
     context_multiplier,
     crossing_bias,
@@ -208,6 +216,8 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
                                      upto=RECEPTION_FROM_FRACTION)
         else:
             cand.p = route_survival(player.pos, end, cand.speed, cand.friction, opponents)
+    elif cand.kind == "shot" and cand.vz > 0.0:
+        cand.p = lofted_shot_survival(player.pos, cand.target, cand.speed, cand.vz, opponents)
     elif cand.vz > 0.0:
         # Lofted: only cut out where it is low enough (see lofted_survival).
         cand.p = lofted_survival(player.pos, cand.target, cand.speed, cand.vz, opponents)
@@ -255,6 +265,8 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
             # matching term a shot loses to a carry even at 15 m with P=0.67 --
             # measured on eight declined chances in a single match.
             cand.v = shot_value(player.pos, attacking_goal_x) * SHOT_DECISIVENESS
+            if cand.vz > 0.0:
+                cand.v = _on_frame(cand, player) * LOFT_SHOT_VALUE * SHOT_DECISIVENESS
         elif cand.is_cross:
             # A cross is worth the first-time finish it sets up: the shot from
             # the spot, through the defenders there. The pass multipliers
@@ -390,6 +402,32 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
         cand.flavour *= tilt
     _set_utility(cand, player, team)
     return cand
+
+
+def _normal_cdf(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _on_frame(cand: Candidate, player: Player) -> float:
+    """His chance of hitting the frame with this lofted shot: inside the posts
+    and under the bar, from the errors game_loop will put on the strike. The
+    aim's angle error against the angle each post stands off the aim, and the
+    lift error, which grows with the ticks the ball is up, against how far the
+    bar is above it."""
+    miss = 1.0 - min(1.0, max(0.0, player.shooting / 100.0))
+    if miss <= 0.0:
+        return 1.0
+    aim = cand.target - player.pos
+    bearing = math.atan2(aim[1], aim[0])
+    off = []
+    for post in (GOAL_TOP_Y, GOAL_BOTTOM_Y):
+        angle = math.atan2(post - player.pos[1], cand.target[0] - player.pos[0]) - bearing
+        off.append(math.atan2(math.sin(angle), math.cos(angle)))
+    sigma = SHOT_ERROR_MAX_RAD * miss * LOFT_ANGLE_ERROR_GAIN
+    wide = _normal_cdf(max(off) / sigma) - _normal_cdf(min(off) / sigma)
+    ticks = float(np.linalg.norm(aim)) / cand.speed
+    rise = height_after(0.0, cand.vz, ticks)
+    return wide * _normal_cdf((CROSSBAR_HEIGHT - rise) / (cand.vz * SHOT_LIFT_ERROR_MAX * miss * ticks))
 
 
 def _receivable_pace(cand: Candidate, passer: Player, state: GameState) -> float:

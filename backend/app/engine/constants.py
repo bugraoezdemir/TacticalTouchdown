@@ -792,6 +792,36 @@ LOFT_RUNWAY_MAX_DEG    = 55.0
 # a further LOFT_RANGE_ERROR_MAX (fraction, at skill 0; 0 at skill 100).
 LOFT_ANGLE_ERROR_GAIN  = 1.5
 LOFT_RANGE_ERROR_MAX   = 0.08   # was 0.12: lofted balls missed by a median 2.7 m
+# Lofted shots, offered from LOFT_SHOT_MIN_DIST to LOFT_SHOT_MAX_DIST from the
+# aim point. The top-corner shot is struck at SHOT_SPEED for the upper corners,
+# to cross the line at TOP_CORNER_HEIGHT, the hardest part of the goal to
+# reach. The chip goes up at CHIP_ANGLE_DEG and drops under the bar, over a
+# keeper who has come out.
+LOFT_SHOT_MIN_DIST     = 10.0   # m
+LOFT_SHOT_MAX_DIST     = 40.0   # m
+CHIP_MAX_DIST          = 28.0   # m
+TOP_CORNER_HEIGHT      = 2.1    # m at the goal line, 0.34 m under the bar
+CHIP_HEIGHT            = 1.7    # m at the goal line
+CHIP_ANGLE_DEG         = 38.0
+# Its lift is off by up to this share (at skill 0; 0 at skill 100), and the
+# further the shot goes the more metres that is: from range many go over.
+SHOT_LIFT_ERROR_MAX    = 0.5
+# A lofted shot's V is its chance of hitting the frame, from his skill, times
+# this. The keeper and the defenders are in its P.
+LOFT_SHOT_VALUE        = 0.5
+# A keeper's reach with his feet where they are. Up to GK_HANDS_HEIGHT it is
+# his whole control radius, along the ground as ever; above it, it narrows like
+# an arm swung up, to nothing at GK_REACH_HEIGHT straight over his head.
+GK_HANDS_HEIGHT        = 1.2    # m
+# A shot crossing above GK_HIGH_SHOT cannot be run under and taken: he reads it
+# (GK_REACTION_TICKS), then leaps at GK_DIVE_SPEED. Below it he goes as ever.
+# These are the numbers the shooter has always planned on, so it is why a top
+# corner is out of his reach from close and within it from far.
+GK_HIGH_SHOT           = 1.5    # m
+# A keeper leaves a shot going this far over the bar, or more.
+GK_LEAVE_OVER_BAR      = 0.3    # m
+# Further than this off his line a ball over his head has to be run back for.
+GK_CAUGHT_OUT          = 3.0    # m
 # ── Crosses ──────────────────────────────────────────────────────────────────
 # From the FLANK in the final third the carrier is offered balls into the box
 # ROLES (BOX_SLOTS), each for the teammate filling that role: along the

@@ -67,6 +67,20 @@ def control_radius(player: Player) -> float:
     return OUTFIELD_CONTROL_RADIUS
 
 
+def keeper_reach(keeper: Player, height: float) -> float:
+    """How far from his feet he can get to a ball at `height`: his whole
+    control radius up to his chest, narrowing above it. The reach at the top
+    corner is what makes it the hardest part of the goal. Physics and the
+    shooter's plan both ask this."""
+    from ..constants import GK_HANDS_HEIGHT, GK_REACH_HEIGHT
+
+    full = control_radius(keeper)
+    if height <= GK_HANDS_HEIGHT:
+        return full
+    over = min(1.0, (height - GK_HANDS_HEIGHT) / (GK_REACH_HEIGHT - GK_HANDS_HEIGHT))
+    return full * math.sqrt(1.0 - over * over)
+
+
 def opponent_risk(
     opponent: Player,
     origin: np.ndarray,
@@ -77,8 +91,11 @@ def opponent_risk(
     is_shot: bool = False,
     delay_ticks: float = 0.0,
     struck: bool = True,
+    reach: float | None = None,
 ) -> float:
     """Probability this one opponent cuts the route out.
+
+    `reach`: his reach for this ball, if not his control radius.
 
     `delay_ticks` is how long before the pass can actually be PLAYED. It is
     zero for a ball being kicked now, but an off-ball player scoring a point he
@@ -122,7 +139,7 @@ def opponent_risk(
     # bigger threat, and score him where he actually blocks.
     t, raw_gap = (t_now, gap_now) if gap_now < gap_moved else (t_moved, gap_moved)
 
-    gap = max(0.0, raw_gap - control_radius(opponent))
+    gap = max(0.0, raw_gap - (control_radius(opponent) if reach is None else reach))
 
     # Where along the route they meet it -- the ball only has to reach that far.
     dist_along = t * math.sqrt(seg_len_sq)
@@ -380,6 +397,63 @@ def lofted_survival(
             risk = max(risk, opponent_risk(
                 opp, origin + unit * d_down, origin + unit * d_end, vh, 0.0,
                 delay_ticks=t_down, struck=False,
+            ))
+        if risk > worst:
+            worst = risk
+            if worst >= 1.0:
+                return 0.0
+    return 1.0 - worst
+
+
+def caught_out(keeper_pos: np.ndarray, goal_x: float) -> bool:
+    """Is he too far off his line to get back to a ball over his head by a
+    dive? Further than he ever stands to cut the angle (GK_ADVANCE)."""
+    from ..constants import GK_CAUGHT_OUT
+
+    return abs(float(keeper_pos[0]) - goal_x) > GK_CAUGHT_OUT
+
+
+def lofted_shot_survival(
+    origin: np.ndarray,
+    target: np.ndarray,
+    vh: float,
+    vz0: float,
+    blockers: Sequence[Player],
+) -> float:
+    """P(a lofted shot gets to the goal line past everybody). In [0, 1].
+
+    lofted_survival for a ball that does not come to earth at `target`: it
+    crosses the line in the air. It can be reached rising off his foot, and
+    again once it has dropped within a man's reach, the keeper's hands
+    included: he is raced by his dive, like any shot, with his reach at the
+    height it crosses -- unless he is caught out, when he has to run back.
+    """
+    from ..ball_flight import below_window, height_at
+    from ..constants import GK_REACH_HEIGHT, HEADER_HEIGHT, RISING_REACH
+
+    offset = np.asarray(target, float) - np.asarray(origin, float)
+    dist = float(np.hypot(offset[0], offset[1]))
+    if dist < _EPS or vh < _EPS:
+        return 1.0
+    unit = offset / dist
+    at_line = dist / vh
+    windows: dict[bool, tuple[float, float]] = {}
+    worst = 0.0
+    for opp in blockers:
+        keeper = opp.position == "GK"
+        if keeper not in windows:
+            ceiling = GK_REACH_HEIGHT if keeper else HEADER_HEIGHT
+            rise = ceiling if keeper else min(ceiling, RISING_REACH)
+            windows[keeper] = (below_window(vz0, rise)[0], below_window(vz0, ceiling)[1])
+        t_up, t_down = windows[keeper]
+        dives = not (keeper and caught_out(opp.pos, float(target[0])))
+        reach = keeper_reach(opp, height_at(vz0, at_line)) if keeper else None
+        risk = opponent_risk(opp, origin, origin + unit * min(dist, t_up * vh), vh, 0.0,
+                             is_shot=dives, struck=True, reach=reach)
+        if t_down < at_line:
+            risk = max(risk, opponent_risk(
+                opp, origin + unit * (t_down * vh), target, vh, 0.0,
+                is_shot=dives, delay_ticks=t_down, struck=False, reach=reach,
             ))
         if risk > worst:
             worst = risk
