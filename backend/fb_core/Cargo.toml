@@ -1,0 +1,17 @@
+[package]
+name = "fb_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fb_core"
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[dependencies]
+numpy = "0.30.0"
+pyo3 = "0.30.1"
