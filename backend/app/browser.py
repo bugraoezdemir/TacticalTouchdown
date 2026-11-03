@@ -6,6 +6,7 @@ does and answers with the same status and JSON.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import pickle
 
@@ -57,11 +58,44 @@ def restore(data) -> None:
     """Pick a stored season up where it was. The matchday's AI fixtures run
     behind the user's match, so they start now only if that has been played."""
     season = pickle.loads(_bytes(data))
+    _fill_new_fields(season)
     tournament._tournament = season
     if not season.finished:
         fixture = season.user_fixture(season.current_matchday)
         if fixture is None or fixture.played:
             tournament.begin_matchday(season)
+
+
+def _fill_new_fields(obj, seen: set[int] | None = None) -> None:
+    """Give every field added since the season was saved its default. The
+    engine's dataclasses use slots, which unpickle field by field and leave a
+    newer field unset: a 0.0.8 season lost TeamTactics.wing_attacks in 0.0.9."""
+    seen = set() if seen is None else seen
+    if id(obj) in seen:
+        return
+    seen.add(id(obj))
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        for f in dataclasses.fields(obj):
+            try:
+                value = getattr(obj, f.name)
+            except AttributeError:
+                if f.default is not dataclasses.MISSING:
+                    value = f.default
+                elif f.default_factory is not dataclasses.MISSING:
+                    value = f.default_factory()
+                else:
+                    continue
+                setattr(obj, f.name, value)
+            _fill_new_fields(value, seen)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _fill_new_fields(value, seen)
+    elif isinstance(obj, (list, tuple, set)):
+        for value in obj:
+            _fill_new_fields(value, seen)
+    elif hasattr(obj, "__dict__") and not isinstance(obj, type):
+        for value in vars(obj).values():
+            _fill_new_fields(value, seen)
 
 
 def _bytes(data) -> bytes:

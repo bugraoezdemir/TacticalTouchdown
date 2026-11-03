@@ -195,3 +195,18 @@ def test_a_sim_worker_returns_what_the_season_records(monkeypatch):
     monkeypatch.setattr(browser_sim, "simulate", quick)
     result = pickle.loads(browser_sim.run(data, lambda *a: seen.append(a)))
     assert result.home_goals == 2 and seen[0][2:] == (1, 0, 900)
+
+
+def test_a_season_saved_before_a_new_setting_still_plays():
+    """A season saved by an older version lacks settings added since (0.0.8
+    had no Wing attacks); restored, they take their defaults and it plays."""
+    season = _season()
+    old = pickle.loads(pickle.dumps(season))
+    for team in old.teams:
+        object.__delattr__(team.tactics, "wing_attacks")
+    data = pickle.dumps(old)
+    browser.handle("POST", "/tournament/reset", {}, None)
+    browser.restore(data)
+    assert all(team.tactics.wing_attacks == 1.0 for team in tournament._tournament.teams)
+    assert browser.handle("POST", "/tournament/start-match", {}, None)[0] == 200
+    assert browser.handle("POST", "/simulate/tick", {"n": "30"}, None)[0] == 200
