@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tactical-touchdown"
+version = "0.0.9"
+description = "A football simulation: set your team's tactics and manage it through an 18-team season."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "numpy",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "httpx"]
+
+[project.urls]
+Play = "https://bugraoezdemir.github.io/TacticalTouchdown/"
+Source = "https://github.com/bugraoezdemir/TacticalTouchdown"
+
+# The engine is the package `app` under backend/. The Rust speed-ups are a
+# separate package: pip install ./backend/fb_core (needs Rust and maturin).
+# Without it the engine runs the same in pure Python, about 2x slower.
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["app*"]

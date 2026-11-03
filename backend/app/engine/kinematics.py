@@ -252,12 +252,14 @@ _GRID_SL = _GRID_S.tolist()
 _rust = None
 if os.environ.get("FB_RUST", "") != "0":
     try:
-        import fb_core
+        # By name: run from backend/, an unbuilt backend/fb_core folder still
+        # imports (as an empty namespace package), and must count as not built.
+        from fb_core import Reach
     except ImportError:
         if os.environ.get("FB_RUST") == "1":
             raise
     else:
-        _rust = fb_core.Reach(_R, _K, float(PLAYER_TAU), _GRID_L, _GRID_SL)
+        _rust = Reach(_R, _K, float(PLAYER_TAU), _GRID_L, _GRID_SL)
         from .constants import rust_constants
         _rust.set_constants(rust_constants())
 # Halvings of the bracket: within 1/256 tick early on, ~0.1 tick at 100 ticks.

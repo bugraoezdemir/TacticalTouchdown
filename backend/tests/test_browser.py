@@ -22,7 +22,8 @@ def _shape(value):
 
 
 def test_every_route_it_serves_exists_on_the_server():
-    served = {(m, r.path) for r in app.routes for m in getattr(r, "methods", ())}
+    # From the schema: newer FastAPI no longer lists included routers' routes in app.routes.
+    served = {(m.upper(), path) for path, ops in app.openapi()["paths"].items() for m in ops}
     assert set(browser.ROUTES) <= served
 
 

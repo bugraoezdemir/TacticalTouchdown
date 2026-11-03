@@ -8,3 +8,6 @@ backend/scratch/
 # Rust build output
 target/
 backend/fb_core/dist_pyodide/
+# Python packaging output
+build/
+*.egg-info/
