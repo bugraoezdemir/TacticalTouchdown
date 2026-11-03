@@ -187,6 +187,8 @@ def set_tactics(update: TacticsUpdate) -> GameStateDTO:
         team.tactics.press_aggression = update.press_aggression
     if update.man_marking is not None:
         team.tactics.man_marking = update.man_marking
+    if update.wing_attacks is not None:
+        team.tactics.wing_attacks = update.wing_attacks
     if update.formation is not None:
         # A name cannot be clamped the way a bias can, so reject it outright.
         if update.formation not in FORMATIONS:
@@ -244,6 +246,7 @@ def set_tactics(update: TacticsUpdate) -> GameStateDTO:
         player.bias_tempo = entry.bias_tempo
         player.bias_press_aggression = entry.bias_press_aggression
         player.bias_man_marking = entry.bias_man_marking
+        player.bias_wing_attacks = entry.bias_wing_attacks
 
     if restation:
         # Formation, team depth and per-player depth all feed assigned_pos.
@@ -419,6 +422,7 @@ def _tactics_dto(tactics) -> TeamTacticsDTO:
         tempo=tactics.tempo,
         press_aggression=tactics.press_aggression,
         man_marking=tactics.man_marking,
+        wing_attacks=tactics.wing_attacks,
         formation=tactics.formation,
     )
 
@@ -468,6 +472,7 @@ def _player_dto(p: Player) -> PlayerDTO:
         bias_tempo=p.bias_tempo,
         bias_press_aggression=p.bias_press_aggression,
         bias_man_marking=p.bias_man_marking,
+        bias_wing_attacks=p.bias_wing_attacks,
         assigned_pos=p.assigned_pos.tolist(),
         marking_target_id=p.marking_target_id,
         has_ball=p.has_ball,

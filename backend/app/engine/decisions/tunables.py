@@ -311,6 +311,17 @@ def man_marking_bias(player, team) -> float:
     return float(min(TACTIC_BIAS_MAX, max(TACTIC_BIAS_MIN, value)))
 
 
+def wing_attacks_bias(player, team) -> float:
+    """How much he favours a pass to the flank, around 1.0 (on_ball._wing_tilt).
+    Neutral treats flank and middle alike."""
+    value = (
+        player.bias_wing_attacks
+        if player.bias_wing_attacks is not None
+        else team.tactics.wing_attacks
+    )
+    return float(min(TACTIC_BIAS_MAX, max(TACTIC_BIAS_MIN, value)))
+
+
 def tempo_bias(player, team) -> float:
     """How fast he runs with the ball, around 1.0 (pace.tempo_factor): above
     1.0 the run and the sprint gain on the walk, below it the walk gains.

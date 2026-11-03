@@ -60,6 +60,9 @@ class Ball:
     # Both 0 for a ball on the ground; see ball_flight.
     height: float = 0.0
     vz: float = 0.0
+    # Radians a tick its flight turns in the air, left of travel positive; 0
+    # for a ball struck straight. See ball_flight.
+    curl: float = 0.0
     # The ball in flight is a cross (counted when a teammate collects it).
     is_cross: bool = False
 
@@ -67,6 +70,7 @@ class Ball:
         """Put it on the ground: at a player's feet or on a restart spot."""
         self.height = 0.0
         self.vz = 0.0
+        self.curl = 0.0
 
 
 @dataclass(slots=True)
@@ -103,6 +107,11 @@ class Player:
     # The strike (Ball.struck_tick) of the pass he has seen is in danger and
     # gone to meet: once he goes he stays gone -- see off_ball._comes_to_ball.
     coming_to_strike: int = -2
+    # A keeper's leap: the strike he left his feet for, and the y he went to.
+    leapt_at: int = -2
+    leap_y: float = 0.0
+    # The man he marked last tick; see off_ball.STICKY_MARKS.
+    marking_id: int | None = None
     # Consecutive ticks he has chosen to hold the ball. Updated in APPLY, read
     # by the next tick's decision: holding is a short wait for something to
     # open up, and its value decays the longer it goes on.
@@ -144,6 +153,7 @@ class Player:
     bias_tempo: float | None = None
     bias_press_aggression: float | None = None
     bias_man_marking: float | None = None
+    bias_wing_attacks: float | None = None
 
 
 @dataclass(slots=True)
@@ -236,6 +246,10 @@ class TeamTactics:
     # below it he stays nearer the zone and hands him on sooner
     # (off_ball._zonal_mark_detail). 1.0 is the old share.
     man_marking: float = 1.0
+    # Wing attacks: above 1.0 a pass to the flank gains on the rest, enough to
+    # win when the two are close and never more than WING_TILT_MAX (on_ball
+    # ._wing_tilt); below it the flank loses. Crossing stays its own slider.
+    wing_attacks: float = 1.0
 
     def get(self, action: str) -> float:
         return {

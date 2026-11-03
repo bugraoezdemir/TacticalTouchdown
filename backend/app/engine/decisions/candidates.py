@@ -77,7 +77,7 @@ from ..ball_flight import chip_launch, drive_launch, loft_launch
 from ..kinematics import reach_distance, reach_ticks
 from ..offside import is_offside_position
 from ..ball_physics import nominal_pass_speed, speed_for_arrival, travel_ticks, weighted_speed
-from ..constants import LEAD_MAX_TICKS, LEAD_MIN_SPEED_SHARE, PITCH_LENGTH, PITCH_WIDTH
+from ..constants import LEAD_MAX_TICKS, LEAD_MIN_SPEED_SHARE, PITCH_LENGTH, PITCH_WIDTH, SHOT_AIM_INSIDE_M
 from ..geometry import normalize
 from ..models import GameState, Player
 from .control import comfortable_strike
@@ -92,6 +92,14 @@ ActionKind = Literal["shot", "pass", "dribble", "hold"]
 OWN_MOMENTUM = os.environ.get("FB_OWN_MOMENTUM", "1") != "0"
 # A/B switch (on); 0 restores shots along the ground only.
 LOFTED_SHOTS = os.environ.get("FB_LOFTED_SHOTS", "1") != "0"
+# A/B switch (on); 0 restores shots that fly straight.
+BENT_SHOTS = os.environ.get("FB_BENT_SHOTS", "1") != "0"
+# A/B switch (on): a ground shot's plan includes missing the target
+# (on_ball._on_target), and it may be aimed SHOT_AIM_INSIDE_M inside a post.
+SHOT_AIM = os.environ.get("FB_SHOT_AIM", "1") != "0"
+# A/B switch (on): lofted and bent shots get that margin too, and their plan
+# counts the first-time error (on_ball._strike_sigma).
+AIM_IN_THE_AIR = os.environ.get("FB_AIM_IN_THE_AIR", "1") != "0"
 
 # 8 candidate dribble directions at 45 degree increments.
 _DRIBBLE_ANGLES = [i * math.pi / 4 for i in range(8)]
@@ -114,6 +122,7 @@ class Candidate:
     # Launch speed upward (m/tick) for a lofted ball; `speed` is then its
     # horizontal pace in the air. 0 for a ball along the ground.
     vz: float = 0.0
+    curl: float = 0.0                 # a bent shot's turn, rad/tick; see ball_flight
     is_cross: bool = False            # into a box role, to be finished first time
     is_clearance: bool = False        # put out of play on purpose
     # The lane's survival, when it was worked out for many passes at once
@@ -157,6 +166,24 @@ def build_candidates(player: Player, state: GameState) -> list[Candidate]:
         ))
         if LOFTED_SHOTS and player.position != "GK":
             out.extend(_lofted_shots(player, np.array([attacking_goal_x, y]), corner=y != GOAL_CENTER_Y))
+        if BENT_SHOTS and player.position != "GK" and y != GOAL_CENTER_Y:
+            out.extend(_bent_shots(player, np.array([attacking_goal_x, y])))
+    if SHOT_AIM:
+        # Further inside each post too: with his miss in the plan
+        # (on_ball._on_target) he picks his own margin for his skill and
+        # the distance.
+        for y in (GOAL_TOP_Y + SHOT_AIM_INSIDE_M, GOAL_BOTTOM_Y - SHOT_AIM_INSIDE_M):
+            out.append(Candidate(
+                kind="shot", target=np.array([attacking_goal_x, y]),
+                speed=SHOT_SPEED, friction=SHOT_FRICTION_COEFF,
+            ))
+            # In the air too: aimed only 0.5 m inside a post, 31-45% of bent
+            # shots went out, and the plan knew it (on_ball._on_frame).
+            if AIM_IN_THE_AIR and player.position != "GK":
+                if LOFTED_SHOTS:
+                    out.extend(_lofted_shots(player, np.array([attacking_goal_x, y]), corner=True))
+                if BENT_SHOTS:
+                    out.extend(_bent_shots(player, np.array([attacking_goal_x, y])))
 
     # ── Passes: direct and runway, each at both speeds ───────────────────────
     # Offering both speeds matters now that PASS_SPEED_LOW genuinely cannot
@@ -315,6 +342,7 @@ def build_candidates(player: Player, state: GameState) -> list[Candidate]:
         out.append(Candidate(
             kind="hold", target=player.pos.copy(), speed=0.0, friction=BALL_FRICTION_COEFF,
         ))
+    _flank_balls_are_crosses(player, team, out)
     return out
 
 
@@ -344,6 +372,27 @@ def _lofted_shots(player: Player, target: np.ndarray, corner: bool) -> "list[Can
         launches.append(chip_launch(dist - CAPTURE_RADIUS - 0.3, CHIP_HEIGHT, CHIP_ANGLE_DEG, SHOT_SPEED))
     return [Candidate(kind="shot", target=target, speed=launch[0], friction=SHOT_FRICTION_COEFF, vz=launch[1])
             for launch in launches if launch is not None]
+
+
+def _bent_shots(player: Player, target: np.ndarray) -> "list[Candidate]":
+    """The shot curled into this top corner, from the left and from the right,
+    if it is in range. On a lofted shot's terms, at BEND_PACE."""
+    from ..constants import (
+        BEND_CURL,
+        BEND_MAX_DIST,
+        BEND_MIN_DIST,
+        BEND_PACE,
+        SHOT_FRICTION_COEFF,
+        TOP_CORNER_HEIGHT,
+    )
+
+    dist = float(np.linalg.norm(target - player.pos))
+    if not BEND_MIN_DIST <= dist <= BEND_MAX_DIST:
+        return []
+    pace = SHOT_SPEED * BEND_PACE
+    vh, vz, _ = drive_launch(dist - pace, TOP_CORNER_HEIGHT, pace)
+    return [Candidate(kind="shot", target=target, speed=vh, friction=SHOT_FRICTION_COEFF, vz=vz, curl=curl)
+            for curl in (BEND_CURL, -BEND_CURL)]
 
 
 def _moving(mate: Player) -> bool:
@@ -675,6 +724,34 @@ def _runway_weight(
     )
 
 
+def _in_cross_zone(player: Player, team) -> bool:
+    """On the flank in the final third (CROSS_FROM, CROSS_WIDE)."""
+    up = float(player.pos[0]) if team.direction == 1 else PITCH_LENGTH - float(player.pos[0])
+    return up >= CROSS_FROM and abs(float(player.pos[1]) - PITCH_WIDTH / 2.0) >= CROSS_WIDE
+
+
+# A/B switch (on); 0 scores a ball from the flank into the box as an ordinary
+# pass unless it was built as a cross.
+FLANK_BALLS_ARE_CROSSES = __import__("os").environ.get("FB_FLANK_CROSSES", "1") != "0"
+
+
+def _flank_balls_are_crosses(player: Player, team, out: list[Candidate]) -> None:
+    """From the flank, any pass into their box is a cross, scored as one.
+
+    The same ball was offered twice: as a cross, worth the finish it sets up,
+    and as a pass, with the pass bonuses for defenders taken out of the game.
+    Once through balls were no longer double-charged (on_ball._lane_end) the
+    pass won: crosses fell from 51 to 8 in 16 matches and flank carriers
+    passed inside on 36% of their decisions instead of 11%."""
+    if not (FLANK_BALLS_ARE_CROSSES and _in_cross_zone(player, team)):
+        return
+    from .off_ball import _in_their_box
+
+    for c in out:
+        if c.kind == "pass" and not c.is_cross and not c.is_clearance and _in_their_box(c.target, team):
+            c.is_cross = True
+
+
 def _crosses(player: Player, state: GameState, team) -> list[Candidate]:
     """Balls from the flank into the box roles (see CROSS_* constants).
 
@@ -685,8 +762,7 @@ def _crosses(player: Player, state: GameState, team) -> list[Candidate]:
     """
     from .off_ball import _box_roles
 
-    up = float(player.pos[0]) if team.direction == 1 else PITCH_LENGTH - float(player.pos[0])
-    if up < CROSS_FROM or abs(float(player.pos[1]) - PITCH_WIDTH / 2.0) < CROSS_WIDE:
+    if not _in_cross_zone(player, team):
         return []
     _, roles = _box_roles(state, team)
     out: list[Candidate] = []

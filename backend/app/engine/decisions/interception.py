@@ -413,12 +413,31 @@ def caught_out(keeper_pos: np.ndarray, goal_x: float) -> bool:
     return abs(float(keeper_pos[0]) - goal_x) > GK_CAUGHT_OUT
 
 
+def bend_miss(keeper: Player, origin: np.ndarray, target: np.ndarray, vh: float, curl: float) -> float:
+    """How far from a bent shot's real arrival his leap leaves him: he goes
+    where it was heading GK_LEAP_TICKS before the line, and it bends on by
+    curl x pace x ticks^2 / 2. Bending away from him that leaves him short.
+    Bending toward him he meets it on his way across, unless he has time to
+    get to where he read it, past it."""
+    from ..constants import GK_DIVE_SPEED, GK_LEAP_TICKS, GK_REACTION_TICKS
+
+    offset = np.asarray(target, float) - np.asarray(origin, float)
+    bends_to = math.copysign(1.0, curl * float(offset[0]))
+    miss = abs(curl) * vh * GK_LEAP_TICKS * GK_LEAP_TICKS / 2.0
+    across = float(target[1]) - float(keeper.pos[1])
+    if across * bends_to > 0.0:
+        return miss
+    ticks = float(np.hypot(offset[0], offset[1])) / vh
+    return miss if abs(across) + miss <= GK_DIVE_SPEED * (ticks - GK_REACTION_TICKS) else 0.0
+
+
 def lofted_shot_survival(
     origin: np.ndarray,
     target: np.ndarray,
     vh: float,
     vz0: float,
     blockers: Sequence[Player],
+    curl: float = 0.0,
 ) -> float:
     """P(a lofted shot gets to the goal line past everybody). In [0, 1].
 
@@ -427,16 +446,32 @@ def lofted_shot_survival(
     again once it has dropped within a man's reach, the keeper's hands
     included: he is raced by his dive, like any shot, with his reach at the
     height it crosses -- unless he is caught out, when he has to run back.
+
+    A bent shot (`curl`) goes round the straight line: each part of the lane
+    is raced in two chords of its arc, so a man on the line may not be in it.
     """
-    from ..ball_flight import below_window, height_at
+    from ..ball_flight import arc_point, below_window, height_at
     from ..constants import GK_REACH_HEIGHT, HEADER_HEIGHT, RISING_REACH
 
     offset = np.asarray(target, float) - np.asarray(origin, float)
     dist = float(np.hypot(offset[0], offset[1]))
     if dist < _EPS or vh < _EPS:
         return 1.0
-    unit = offset / dist
     at_line = dist / vh
+    turn = curl * at_line
+    lane = [(0.0, 0.5), (0.5, 1.0)] if curl != 0.0 else [(0.0, 1.0)]
+
+    def along(t0: float, t1: float, **race) -> float:
+        """The worst of `opp` over the ball's flight from tick t0 to t1."""
+        out = 0.0
+        for a, b in lane:
+            start = t0 + (t1 - t0) * a
+            out = max(out, opponent_risk(
+                opp, arc_point(origin, target, min(1.0, start / at_line), turn),
+                arc_point(origin, target, min(1.0, (t0 + (t1 - t0) * b) / at_line), turn),
+                vh, 0.0, delay_ticks=start, **race))
+        return out
+
     windows: dict[bool, tuple[float, float]] = {}
     worst = 0.0
     for opp in blockers:
@@ -448,13 +483,11 @@ def lofted_shot_survival(
         t_up, t_down = windows[keeper]
         dives = not (keeper and caught_out(opp.pos, float(target[0])))
         reach = keeper_reach(opp, height_at(vz0, at_line)) if keeper else None
-        risk = opponent_risk(opp, origin, origin + unit * min(dist, t_up * vh), vh, 0.0,
-                             is_shot=dives, struck=True, reach=reach)
+        if keeper and curl != 0.0:
+            reach = max(0.0, reach - bend_miss(opp, origin, target, vh, curl))
+        risk = along(0.0, min(at_line, t_up), is_shot=dives, struck=True, reach=reach)
         if t_down < at_line:
-            risk = max(risk, opponent_risk(
-                opp, origin + unit * (t_down * vh), target, vh, 0.0,
-                is_shot=dives, delay_ticks=t_down, struck=False, reach=reach,
-            ))
+            risk = max(risk, along(t_down, at_line, is_shot=dives, struck=False, reach=reach))
         if risk > worst:
             worst = risk
             if worst >= 1.0:

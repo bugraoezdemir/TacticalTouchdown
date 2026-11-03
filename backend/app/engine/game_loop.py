@@ -178,7 +178,9 @@ def tick(state: GameState) -> GameState:
 
     # 2b. Player movements
     for player in state.all_players():
-        _apply_player_movement(player, player_actions[player.player_id])
+        action = player_actions[player.player_id]
+        _apply_player_movement(player, action)
+        player.marking_id = action.marking_id if isinstance(action, OffBallAction) else None
 
     # 2c. Ball owner actions
     for player in state.all_players():
@@ -212,6 +214,7 @@ def tick(state: GameState) -> GameState:
             # the ground.
             state.ball.vz = (_lift_error(action.vz, player, state)
                              if action.action_type == "shot" and action.vz > 0.0 else action.vz)
+            state.ball.curl = _curl_error(action.curl, player, state) if action.curl != 0.0 else 0.0
             state.ball.height = (player.first_touch_height
                                  if player.first_touch_height > CONTROL_HEIGHT else 0.0)
             # Whatever he did with it, the first touch has been taken.
@@ -423,11 +426,15 @@ def _shot_is_on_target(state: GameState, shooter: Player) -> bool:
     keeper then saves it is a separate question -- an on-target shot is one he
     has to deal with.
     """
-    from .ball_flight import height_after
+    from .ball_flight import crossing, height_after
     from .constants import CROSSBAR_HEIGHT, GOAL_BOTTOM_Y, GOAL_TOP_Y, LEFT_GOAL_X, RIGHT_GOAL_X
 
     team = state.get_team(shooter.team_id)
     goal_x = RIGHT_GOAL_X if team.direction == 1 else LEFT_GOAL_X
+    if state.ball.curl != 0.0:
+        where = crossing(state.ball.pos, state.ball.velocity, state.ball.height, state.ball.vz,
+                         state.ball.curl, goal_x)
+        return where is not None and GOAL_TOP_Y <= where[0] <= GOAL_BOTTOM_Y and where[1] <= CROSSBAR_HEIGHT
     vx = float(state.ball.velocity[0])
     if abs(vx) < 1e-9:
         return False
@@ -447,6 +454,14 @@ def _lift_error(vz: float, player: Player, state: GameState) -> float:
 
     quality = min(1.0, max(0.0, player.shooting / 100.0))
     return vz * max(0.0, 1.0 + float(state.rng.normal(0.0, SHOT_LIFT_ERROR_MAX * (1.0 - quality))))
+
+
+def _curl_error(curl: float, player: Player, state: GameState) -> float:
+    """A bent shot's spin, as struck: off by a skill-scaled share."""
+    from .constants import SHOT_CURL_ERROR_MAX
+
+    quality = min(1.0, max(0.0, player.shooting / 100.0))
+    return curl * (1.0 + float(state.rng.normal(0.0, SHOT_CURL_ERROR_MAX * (1.0 - quality))))
 
 
 def _apply_player_movement(player: Player, action: OffBallAction | OnBallAction) -> None:

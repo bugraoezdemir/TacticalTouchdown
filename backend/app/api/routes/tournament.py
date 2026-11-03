@@ -140,7 +140,7 @@ def set_tactics(update: TournamentTacticsUpdate) -> TournamentDTO:
         "shoot", "pass_", "dribble", "pressing", "roaming", "offensiveness",
         "direct", "one_two", "attack_call", "pass_range", "breadth", "compactness",
         "possession", "crossing", "lofted", "risk", "tempo", "press_aggression",
-        "man_marking",
+        "man_marking", "wing_attacks",
     ):
         value = getattr(update, field)
         if value is not None:

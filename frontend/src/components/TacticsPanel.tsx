@@ -25,7 +25,8 @@ type Action =
   | "risk"
   | "tempo"
   | "press_aggression"
-  | "man_marking";
+  | "man_marking"
+  | "wing_attacks";
 type BiasField =
   | "bias_shoot"
   | "bias_pass"
@@ -45,7 +46,8 @@ type BiasField =
   | "bias_risk"
   | "bias_tempo"
   | "bias_press_aggression"
-  | "bias_man_marking";
+  | "bias_man_marking"
+  | "bias_wing_attacks";
 
 interface Slider {
   key: Action;
@@ -64,6 +66,7 @@ const ATTACKING: Slider[] = [
   { key: "attack_call", label: "Attack call", biasField: "bias_attack_call" },
   { key: "pass_range", label: "Pass range", biasField: "bias_pass_range" },
   { key: "possession", label: "Possession", biasField: "bias_possession" },
+  { key: "wing_attacks", label: "Wing attacks", biasField: "bias_wing_attacks" },
   { key: "crossing", label: "Crosses", biasField: "bias_crossing" },
   { key: "lofted", label: "Lofted balls", biasField: "bias_lofted" },
   { key: "risk", label: "Risk", biasField: "bias_risk" },

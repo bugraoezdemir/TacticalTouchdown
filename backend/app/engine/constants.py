@@ -301,6 +301,9 @@ PASS_CONTINUATION_DISCOUNT = 0.85 # a shot's value is terminal; a pass's is not
 # inertia a receiver cannot simply step across to fix it. Halved (2026-10-26).
 PASS_ERROR_MAX_RAD = 0.10   # rad of angular error at skill 0; 0 at skill 100
 SHOT_ERROR_MAX_RAD = 0.16
+# A ground shot is also offered this far inside each post (and 0.5 m, and the
+# middle): with his miss in the plan, the shooter picks the margin.
+SHOT_AIM_INSIDE_M  = 1.2   # m
 DRIBBLE_TOUCH_MIN  = 1.2    # m; a great dribbler keeps it this close
 DRIBBLE_TOUCH_MAX  = 3.0    # m; a poor one knocks it this far
 
@@ -434,14 +437,20 @@ SHAPE_CALL_OUTLET_KEEP_M = 5.0 # m; the outlet stays his while within this of th
 # The outfielder of rank BLOCK_FRONT_RANK (0 = deepest) fits in behind the ball,
 # so only the men in front of him stay ahead of it, but the formation keeps at
 # least BLOCK_LENGTH_MIN of its length. Width narrows to BLOCK_WIDTH_MIN from
-# BLOCK_SQUEEZE_FAR in to DANGER_FAR, which takes centre-backs 14 m apart to 10 m.
-# Only BLOCK_ACROSS_NEAR of the sideways slide applies with the ball at our line.
+# BLOCK_SQUEEZE_FAR in to DANGER_FAR, which takes centre-backs 14 m apart to 8 m
+# and a back four 37 m wide to 28. Only BLOCK_ACROSS_NEAR of the sideways slide
+# applies with the ball at our line.
+# Were 0.72 and 0.5 (2026-11-03): with the ball within 35 m the back four stood
+# 32 m wide, a 14 m hole between a centre-back and his full-back 72% of the
+# time, and 85% of goals came with one there at the final ball, the scorer
+# shooting from 22 m. At 0.55 and 0.8 (scratch/wide_goals.py, 16 matches):
+# holes 42% and 33% at goals, shots 209 -> 148, goals 37 -> 30, from 14 m.
 BLOCK_LINE_MIN    = 6.0        # m
 BLOCK_FRONT_RANK  = 7
 BLOCK_LENGTH_MIN  = 0.35
-BLOCK_WIDTH_MIN   = 0.72
+BLOCK_WIDTH_MIN   = 0.55
 BLOCK_SQUEEZE_FAR = 70.0       # m
-BLOCK_ACROSS_NEAR = 0.5
+BLOCK_ACROSS_NEAR = 0.8
 # Closing down the carrier under inertia: the arrive time constant, in taus.
 # 1.0 brakes late (a little overshoot is contact, not a fault); the 2.0 used to
 # settle on a fixed spot reached him at walking pace.
@@ -558,6 +567,17 @@ PRESS_LOOKAHEAD_TICKS = 15.0
 PRESS_MAX             = 3
 MARK_KEEP_CLOSENESS  = 0.5   # a defender with a mark at least this dangerous stays on it
 GOAL_SIDE_STANDOFF  = 1.2   # m goal-side of the carrier: in his shot, not on his toes
+# In shooting range the man in front going at a carrier stands in his shot
+# fully, not blended with the run he would cut off: full from SHOT_LINE_NEAR m
+# from our goal, fading out by SHOT_LINE_FAR. With the blend alone (danger:
+# about half at 24 m) the nearest goal-side man stood 3-4 m off the line,
+# moving mostly across the pitch beside the carrier, and 79 of 96 shots from
+# 12-30 m had an open line (all 12 goals). 16 matches (scratch/shot_diag.py,
+# shotline_diag.py): goals 26 to 20, goal hidden from a carrier 12-24 m out
+# 15% to 16-18% of the time. A man stepping across into the line at 2-5 m
+# instead of going at him was tried and dropped: 36 goals.
+SHOT_LINE_NEAR      = 25.0  # m
+SHOT_LINE_FAR       = 32.0  # m
 # How far ahead of the carrier (toward our goal) a defender must be to count as
 # cover. A little positive, so a man exactly level with him -- who has no body
 # in the shot -- does not stand a goal-side teammate down.
@@ -643,6 +663,14 @@ RECEPTION_TAU         = 6.0  # ticks; smoothness of the receiver-vs-opponent rac
 # the flight before that is route_survival's -- and runs until the ball stops
 # or leaves the pitch, up to the horizon.
 RECEPTION_FROM_FRACTION = 0.6
+# A runway ball landing this far beyond every outfield opponent is a through
+# ball: its lane stops where the race starts (on_ball._lane_end).
+THROUGH_BEYOND_M = 1.0   # m
+# A through ball is worth the shot it sets up (on_ball._through_chance): the
+# runner carries it on toward goal, at PACE_SPRINT_FROM of his top pace, as
+# long as he stays ahead of the defenders, and shoots by THROUGH_SHOT_FROM_M
+# from the middle of the goal.
+THROUGH_SHOT_FROM_M = 11.0   # m
 RECEPTION_HORIZON_TICKS = 150.0   # 5 s
 # Each to-feet pass is offered at these multiples of the rule-based pace, and
 # the reception race picks. One pace from a fixed rule could not see who stood
@@ -809,6 +837,17 @@ SHOT_LIFT_ERROR_MAX    = 0.5
 # A lofted shot's V is its chance of hitting the frame, from his skill, times
 # this. The keeper and the defenders are in its P.
 LOFT_SHOT_VALUE        = 0.5
+# The bent shot, curled into a top corner from either side, from BEND_MIN_DIST
+# to BEND_MAX_DIST from it. It turns BEND_CURL radians a tick in the air, so the
+# further out the more it bends: 20 degrees in all from 25 m, which is 4.4 m off
+# the line it left his foot on. Curl costs power: BEND_PACE of SHOT_SPEED,
+# 28 m/s. Its spin is off by up to SHOT_CURL_ERROR_MAX (share, at skill 0; 0 at
+# skill 100).
+BEND_MIN_DIST          = 12.0   # m
+BEND_MAX_DIST          = 26.0   # m; at 35, 81 of 139 shots came from 25-32 m
+BEND_CURL              = 0.013  # rad/tick
+BEND_PACE              = 0.85
+SHOT_CURL_ERROR_MAX    = 0.25
 # A keeper's reach with his feet where they are. Up to GK_HANDS_HEIGHT it is
 # his whole control radius, along the ground as ever; above it, it narrows like
 # an arm swung up, to nothing at GK_REACH_HEIGHT straight over his head.
@@ -818,10 +857,18 @@ GK_HANDS_HEIGHT        = 1.2    # m
 # These are the numbers the shooter has always planned on, so it is why a top
 # corner is out of his reach from close and within it from far.
 GK_HIGH_SHOT           = 1.5    # m
+# He stays on his feet, adjusting, until the ball is this far from the line,
+# then leaves them for good: under half a second, whatever the range. A ball
+# flying straight is where he read it; only one that bends has moved. Measured
+# (scratch/bent_probe.py, true strikes 20-32 m): at 12 a bend hardly scores, at
+# 14 about a third, at 16 nearly all.
+GK_LEAP_TICKS          = 14.0
 # A keeper leaves a shot going this far over the bar, or more.
 GK_LEAVE_OVER_BAR      = 0.3    # m
 # Further than this off his line a ball over his head has to be run back for.
 GK_CAUGHT_OUT          = 3.0    # m
+# A marker keeps his man out to this multiple of his reach (off_ball.STICKY_MARKS).
+MARK_KEEP              = 1.3
 # ── Crosses ──────────────────────────────────────────────────────────────────
 # From the FLANK in the final third the carrier is offered balls into the box
 # ROLES (BOX_SLOTS), each for the teammate filling that role: along the
@@ -948,6 +995,16 @@ PASS_RANGE_EXPONENT = 0.6   # how sharply preference ramps away from the pivot
 # near-tie (97-99% one way even at x1.23), while here they get nearly the same
 # factor and the tilt separates short balls from long ones.
 DIRECT_RUN_M = 20.0
+# Wing attacks: a pass to the flank is scaled by
+#     wing ** (WING_TILT_GAIN x flank),  flank = 0 within WING_INNER_M of the
+#     middle of the pitch's width, 1 from WING_OUTER_M out, linear between.
+# One-sided: the middle keeps its utility, so at 2.0 a flank pass gains at most
+# x1.23 and wins only when the two are close -- an obvious chance through the
+# middle is never given up for it. Within the passes only (PASS_STAGES), so it
+# picks which pass, not whether to pass rather than shoot.
+WING_INNER_M   = 9.0
+WING_OUTER_M   = 20.0
+WING_TILT_GAIN = 0.3
 STATION_DEPTH_GAIN = 0.45  # damping on the depth shift, so a high line is not goal-hanging
 
 # ── Restart pauses (ticks at 30 Hz) ──────────────────────────────────────────

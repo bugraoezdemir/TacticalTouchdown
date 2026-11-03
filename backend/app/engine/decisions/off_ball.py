@@ -28,6 +28,7 @@ from ..constants import (
     CROSSBAR_HEIGHT,
     GK_DIVE_SPEED,
     GK_HIGH_SHOT,
+    GK_LEAP_TICKS,
     GK_LEAVE_OVER_BAR,
     GK_REACTION_TICKS,
     BALL_FRICTION_COEFF,
@@ -45,6 +46,8 @@ from ..constants import (
     GOAL_CENTER_Y,
     GOAL_SIDE_MIN_AHEAD,
     GOAL_SIDE_STANDOFF,
+    SHOT_LINE_FAR,
+    SHOT_LINE_NEAR,
     CONTEST_MARGIN_TICKS,
     CONTEST_SAME_POINT_RADIUS,
     OFFBALL_RING_POINTS,
@@ -102,6 +105,7 @@ from ..constants import (
     RECOVER_SPRINT_GAP,
     RECOVER_TRIANGLE_MARGIN,
     JOG_SHARE,
+    MARK_KEEP,
     GK_ADVANCE,
     LINE_SHARE,
     LINE_FADE_FAR,
@@ -204,6 +208,8 @@ class OffBallAction:
     # the last metres and reached him at walking pace: near our goal the
     # carrier was more than 3 m free on 45-49% of ticks (24% without inertia).
     press_velocity: np.ndarray | None = None
+    # The man he is marking; see Player.marking_id.
+    marking_id: int | None = None
 
 
 # -- Entry point --------------------------------------------------------------
@@ -529,6 +535,7 @@ def _out_of_possession(
         outlets = opponent_outlets(state, owner)
         lam = compute_lambda(confidence, cover, outlets, 1.0 + DANGER_PRESS_GAIN * danger)
         target = aim_point(ball.pos, heading, carrier_speed, t_arrive, lam)
+        lead = target
         # Press aggression: on the way to the ball, onto the lane of the pass
         # he is most likely to play (_press_lane_spot, PRESS_LANE_MIN_M).
         share = press_lane_share(press_aggression_bias(player, team))
@@ -546,10 +553,20 @@ def _out_of_possession(
         # 12-25 m had nobody in their path, and 100% inside 12 m. Blend toward
         # a point just goal-side of the carrier, on his line to our goal, as
         # danger rises -- that is what denies a comfortable shot.
-        if danger > 0.0:
-            to_goal = normalize(np.array([own_goal_x, GOAL_CENTER_Y]) - owner.pos)
-            goal_side = owner.pos + to_goal * GOAL_SIDE_STANDOFF
-            target = target + (goal_side - target) * danger
+        # In shooting range the man in front stands in it fully
+        # (_shot_line_weight), goal-side of where the carrier will be when he
+        # gets there (aim_point): goal-side of where he is now, a man coming
+        # from the side ended up behind the point. A man chasing from behind
+        # keeps the blend.
+        weight, base = danger, owner.pos
+        if _goal_side_of(player, owner, own_goal_x):
+            line = _shot_line_weight(owner.pos, own_goal_x)
+            if line > weight:
+                weight, base = line, lead
+        if weight > 0.0:
+            to_goal = normalize(np.array([own_goal_x, GOAL_CENTER_Y]) - base)
+            goal_side = base + to_goal * GOAL_SIDE_STANDOFF
+            target = target + (goal_side - target) * weight
 
     target = _clamp_to_pitch(target)
 
@@ -590,14 +607,16 @@ def _out_of_possession(
         player, state, team, owner, own_goal_x, danger, target, t_arrive, engaged,
     ):
         first = not engaged
+        in_shot = owner is not None and _in_the_shot(player, state, owner, own_goal_x, engaged)
         engaged.append(player.player_id)
         # A loose ball is attacked through its meeting point; a carrier is
         # closed down hard, braking only as late as he can, on his motion.
         # The FIRST man on a carrier goes straight to him: spreading him off
         # teammates' spots kept him ~2 m away and the carrier free to shoot
-        # (more than 3 m free on 49% of ticks 12-18 m out). Later pressers
-        # still spread, so they arrive from other angles.
-        aim = target if (first and owner is not None) else \
+        # (more than 3 m free on 49% of ticks 12-18 m out). So does the man
+        # in the shot (_in_the_shot). Later pressers still spread, so they
+        # arrive from other angles.
+        aim = target if ((first or in_shot) and owner is not None) else \
             _spread_from_teammates(target, player, state, committed)
         return OffBallAction(
             aim, sprint=True,
@@ -860,6 +879,44 @@ def _danger(pos: np.ndarray, own_goal_x: float) -> float:
     """
     d = float(np.hypot(float(pos[0]) - own_goal_x, float(pos[1]) - GOAL_CENTER_Y))
     return float(min(1.0, max(0.0, (DANGER_FAR - d) / (DANGER_FAR - DANGER_NEAR))))
+
+
+# A/B switch (on); 0 restores the shot line blended in by danger alone.
+SHOT_LINE = os.environ.get("FB_SHOT_LINE", "1") != "0"
+# A/B switch (on); 0 lets the keeper read a low shot from the first tick and
+# go at it at full speed (_gk_decision).
+GK_GROUND_READ = os.environ.get("FB_GK_GROUND_READ", "1") != "0"
+# A/B switch (on); 0 stands the keeper on the line to the middle of his goal
+# (_gk_spot).
+GK_BISECTOR = os.environ.get("FB_GK_BISECTOR", "1") != "0"
+
+
+def _shot_line_weight(pos: np.ndarray, own_goal_x: float) -> float:
+    """1 within SHOT_LINE_NEAR of our goal, 0 beyond SHOT_LINE_FAR, linear
+    between: how fully the man going at a carrier here stands in his shot."""
+    if not SHOT_LINE:
+        return 0.0
+    d = float(np.hypot(float(pos[0]) - own_goal_x, float(pos[1]) - GOAL_CENTER_Y))
+    return float(min(1.0, max(0.0, (SHOT_LINE_FAR - d) / (SHOT_LINE_FAR - SHOT_LINE_NEAR))))
+
+
+def _in_the_shot(
+    player: Player, state: GameState, carrier: Player, own_goal_x: float, engaged: list[int]
+) -> bool:
+    """Is he the man going at a carrier in shooting range who stands in the
+    shot: goal-side of him, with no one going at him already goal-side?
+
+    He is not spread off his teammates' spots. Spread as a later presser
+    behind a man chasing from behind, he was put 2-4 m off the shot line.
+    """
+    if _shot_line_weight(carrier.pos, own_goal_x) <= 0.0:
+        return False
+    if not _goal_side_of(player, carrier, own_goal_x):
+        return False
+    return not any(
+        _goal_side_of(state.get_player(pid), carrier, own_goal_x)
+        for pid in engaged if pid != player.player_id
+    )
 
 
 def _should_engage(
@@ -1602,6 +1659,13 @@ def _not_too_deep(anchor: np.ndarray, state: GameState, team: Team) -> np.ndarra
 _ENGAGED: dict[int, tuple[int, list[int]]] = {}
 # A/B switch for measurement; on by default.
 ZONAL_MARKING = os.environ.get("FB_ZONAL", "1") != "0"
+# A/B switch (on); 0 restores marks shared out afresh every tick. A marker now
+# keeps his man out to MARK_KEEP x his reach. Measured (scratch/job_churn.py,
+# 8 matches): job changes per player-minute 49 to 38, undone within half a
+# second 18 to 12. Holding a presser on the carrier the same way added almost
+# nothing to that and halved the shots blocked (53 to 25, 16 matches): he has
+# to stay free to step into the lane.
+STICKY_MARKS = os.environ.get("FB_STICKY_MARKS", "1") != "0"
 
 
 def _engaged_this_tick(
@@ -1683,6 +1747,17 @@ def _zonal_assignment_compute(
     )
     marks: dict[int, Player] = {}
     taken: set[int] = set()
+    if STICKY_MARKS:
+        # A marker keeps his man; the rest are shared out around them.
+        index = {t.player_id: j for j, t in enumerate(threats)}
+        for d in defenders:
+            if d.marking_id not in index:
+                continue
+            j = index[d.marking_id]
+            gap = _zone_gap(d, centres[d.player_id], threats[j])
+            if j not in taken and gap < MARK_KEEP * _zone_reach(d, team, dangers[j]):
+                marks[d.player_id] = threats[j]
+                taken.add(j)
     for gap, i, j in pairs:
         if gap >= _zone_reach(defenders[i], team, dangers[j]):
             continue
@@ -1763,6 +1838,7 @@ def _mark_action(
     return OffBallAction(
         spot, sprint=sprint,
         press_velocity=man.velocity * strength if kinematics.INERTIA else None,
+        marking_id=man.player_id,
     )
 
 
@@ -1787,6 +1863,8 @@ def _zonal_mark_detail(
     # the man or the zone. An exponent, so 0 and 1 stay where they are.
     danger = _danger(man.pos, own_goal_x)
     reach = _zone_reach(player, team, danger)
+    if STICKY_MARKS and player.marking_id == man.player_id:
+        reach *= MARK_KEEP
     full = ZONE_FULL * reach / ZONE_RADIUS
     in_zone = min(1.0, max(0.0, (reach - _zone_gap(player, centre, man)) / (reach - full)))
     strength = in_zone * (ZONE_MARK_FLOOR + (1.0 - ZONE_MARK_FLOOR) * closeness)
@@ -2136,6 +2214,22 @@ def _gk_decision(
                 # it, then leaps, and the far top corner may be too far.
                 if state.tick - ball.struck_tick < GK_REACTION_TICKS:
                     return OffBallAction(player.pos.copy(), sprint=False, dive=True, pace=0.0)
+                # He adjusts on his feet until the ball is a leap away. In the
+                # air he cannot change his mind: he goes where he read it then,
+                # and a ball that moves after that has beaten him.
+                if (player.leapt_at != ball.struck_tick
+                        and (own_goal_x - float(ball.pos[0])) / float(ball.velocity[0]) <= GK_LEAP_TICKS):
+                    player.leapt_at, player.leap_y = ball.struck_tick, target_y
+                if player.leapt_at == ball.struck_tick:
+                    target[1] = player.leap_y
+                return OffBallAction(target, sprint=True, dive=True, pace=GK_DIVE_SPEED)
+            if GK_GROUND_READ:
+                # Low too: he reads it, then dives -- the numbers the shooter
+                # plans on. Reading it from the first tick at full speed, he
+                # saved 48% of one-on-ones from 12-18 m that the shooter
+                # thought were goals 53% of the time, and scored 13%.
+                if state.tick - ball.struck_tick < GK_REACTION_TICKS:
+                    return OffBallAction(player.pos.copy(), sprint=False, dive=True, pace=0.0)
                 return OffBallAction(target, sprint=True, dive=True, pace=GK_DIVE_SPEED)
             return OffBallAction(target, sprint=True, dive=True)
 
@@ -2161,13 +2255,28 @@ def _gk_decision(
 
 
 def _gk_spot(ball_pos: np.ndarray, own_goal_x: float, team: Team) -> np.ndarray:
-    """Where the keeper stands: GK_ADVANCE out from the middle of his goal,
-    toward the ball, never behind his line."""
+    """Where the keeper stands: on the line that halves the ball's angle to
+    his two posts, GK_ADVANCE out from where it meets his goal line, never
+    behind his line.
+
+    On the line to the middle of his goal instead, from any angle he stood
+    toward the far post and left the near one open: one-on-ones went to the
+    near corner 84% of the time, and to the far one only when he had moved
+    toward the near post."""
     goal = np.array([own_goal_x, GOAL_CENTER_Y])
-    u = normalize(ball_pos - goal)
+    hit = goal
+    if GK_BISECTOR:
+        to_top = normalize(np.array([own_goal_x, GOAL_TOP_Y]) - ball_pos)
+        to_bottom = normalize(np.array([own_goal_x, GOAL_BOTTOM_Y]) - ball_pos)
+        half = to_top + to_bottom
+        if abs(float(half[0])) > 1e-9:
+            # Where the halving line crosses the goal line.
+            t = (own_goal_x - float(ball_pos[0])) / float(half[0])
+            hit = np.array([own_goal_x, float(ball_pos[1]) + t * float(half[1])])
+    u = normalize(ball_pos - hit)
     if float(np.hypot(u[0], u[1])) < 1e-9:
         u = np.array([float(team.direction), 0.0])
-    spot = goal + u * GK_ADVANCE
+    spot = hit + u * GK_ADVANCE
     line = own_goal_x + 0.5 * team.direction
     if (float(spot[0]) - line) * team.direction < 0.0:
         spot[0] = line

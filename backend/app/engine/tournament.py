@@ -99,6 +99,7 @@ PLAYER_BIAS_FIELDS: tuple[str, ...] = (
     "bias_tempo",
     "bias_press_aggression",
     "bias_man_marking",
+    "bias_wing_attacks",
 )
 
 
@@ -222,7 +223,7 @@ def random_ball_style(rng: np.random.Generator) -> tuple[float, float]:
 
 # Sliders added since, on their own generator for the same reason. A new slider
 # goes here, or every AI team plays it at neutral.
-_LATER_SLIDERS: tuple[str, ...] = ("risk", "tempo", "press_aggression", "man_marking")
+_LATER_SLIDERS: tuple[str, ...] = ("risk", "tempo", "press_aggression", "man_marking", "wing_attacks")
 
 
 def random_later_sliders(tactics: TeamTactics, rng: np.random.Generator) -> None:

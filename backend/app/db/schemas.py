@@ -47,6 +47,7 @@ class PlayerDTO(BaseModel):
     bias_tempo: float | None = None
     bias_press_aggression: float | None = None
     bias_man_marking: float | None = None
+    bias_wing_attacks: float | None = None
     assigned_pos: list[float]
     marking_target_id: int | None
     has_ball: bool
@@ -74,6 +75,7 @@ class TeamTacticsDTO(BaseModel):
     tempo: float = 1.0
     press_aggression: float = 1.0
     man_marking: float = 1.0
+    wing_attacks: float = 1.0
     formation: str = "4-4-2"
 
 
@@ -106,6 +108,7 @@ class PlayerBiasUpdate(BaseModel):
     bias_tempo: float | None = None
     bias_press_aggression: float | None = None
     bias_man_marking: float | None = None
+    bias_wing_attacks: float | None = None
 
 
 class TacticsUpdate(BaseModel):
@@ -131,6 +134,7 @@ class TacticsUpdate(BaseModel):
     tempo: float | None = None
     press_aggression: float | None = None
     man_marking: float | None = None
+    wing_attacks: float | None = None
     formation: str | None = None
     players: list[PlayerBiasUpdate] = []
 
@@ -236,6 +240,7 @@ class TournamentPlayerBiasDTO(BaseModel):
     bias_tempo: float | None = None
     bias_press_aggression: float | None = None
     bias_man_marking: float | None = None
+    bias_wing_attacks: float | None = None
 
 
 class TournamentTeamDTO(BaseModel):
@@ -340,6 +345,7 @@ class TournamentTacticsUpdate(BaseModel):
     tempo: float | None = None
     press_aggression: float | None = None
     man_marking: float | None = None
+    wing_attacks: float | None = None
     # Per-player overrides to store. A slot listed here REPLACES whatever was
     # stored for it, so clearing an override is sending that slot with every
     # value None.

@@ -114,6 +114,7 @@ def test_keepers_do_not_shoot_in_the_air():
 def test_the_switch(monkeypatch):
     state, p, _ = _shooter()
     monkeypatch.setattr(ca, "LOFTED_SHOTS", False)
+    monkeypatch.setattr(ca, "BENT_SHOTS", False)
     assert all(c.vz == 0.0 for c in ca.build_candidates(p, state) if c.kind == "shot")
 
 
@@ -202,7 +203,19 @@ def test_he_reads_a_high_shot_before_he_leaps():
     assert action.dive and action.pace == GK_DIVE_SPEED
 
 
-def test_along_the_ground_he_goes_at_once_and_flat_out():
+def test_along_the_ground_he_reads_it_then_dives_too():
+    state, _, keeper = _shooter(14.0)
+    ball = _high_shot(state, y=36.5, height=0.0)
+    ball.vz = 0.0
+    action = ob.off_ball_decision(keeper, state)
+    assert action.dive and action.pace == 0.0
+    ball.struck_tick = state.tick - int(GK_REACTION_TICKS)
+    action = ob.off_ball_decision(keeper, state)
+    assert action.dive and action.pace == GK_DIVE_SPEED
+
+
+def test_the_ground_read_switch(monkeypatch):
+    monkeypatch.setattr(ob, "GK_GROUND_READ", False)
     state, _, keeper = _shooter(14.0)
     ball = _high_shot(state, y=36.5, height=0.0)
     ball.vz = 0.0

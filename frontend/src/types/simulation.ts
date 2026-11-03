@@ -41,6 +41,7 @@ export interface PlayerDTO {
   bias_tempo?: number | null;
   bias_press_aggression?: number | null;
   bias_man_marking?: number | null;
+  bias_wing_attacks?: number | null;
   assigned_pos: [number, number];
   marking_target_id: number | null;
   has_ball: boolean;
@@ -68,6 +69,7 @@ export interface TeamTacticsDTO {
   tempo: number;
   press_aggression: number;
   man_marking: number;
+  wing_attacks: number;
   formation: string;
 }
 
@@ -102,6 +104,7 @@ export interface TacticsUpdate {
   tempo?: number;
   press_aggression?: number;
   man_marking?: number;
+  wing_attacks?: number;
   formation?: string;
   players?: {
     player_id: number;
@@ -124,6 +127,7 @@ export interface TacticsUpdate {
   bias_tempo?: number | null;
   bias_press_aggression?: number | null;
   bias_man_marking?: number | null;
+  bias_wing_attacks?: number | null;
   }[];
 }
 
@@ -228,6 +232,7 @@ export interface TournamentPlayerBias {
   bias_tempo?: number | null;
   bias_press_aggression?: number | null;
   bias_man_marking?: number | null;
+  bias_wing_attacks?: number | null;
 }
 
 export interface TournamentTeam {

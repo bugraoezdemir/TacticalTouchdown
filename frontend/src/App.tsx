@@ -88,7 +88,8 @@ export default function App() {
       | "risk"
       | "tempo"
       | "press_aggression"
-      | "man_marking",
+      | "man_marking"
+      | "wing_attacks",
     value: number,
   ) {
     updateTactics({ team_id: teamId, [action]: value });
@@ -122,7 +123,8 @@ export default function App() {
       | "bias_risk"
       | "bias_tempo"
       | "bias_press_aggression"
-      | "bias_man_marking",
+      | "bias_man_marking"
+      | "bias_wing_attacks",
     value: number | null,
   ) {
     const team = teamId === state?.home_team.team_id
@@ -172,6 +174,8 @@ export default function App() {
           field === "bias_press_aggression" ? value : player.bias_press_aggression,
         bias_man_marking:
           field === "bias_man_marking" ? value : player.bias_man_marking,
+        bias_wing_attacks:
+          field === "bias_wing_attacks" ? value : player.bias_wing_attacks,
       }],
     });
   }

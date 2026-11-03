@@ -70,7 +70,7 @@ def compute_ball_update(ball: Ball) -> BallDelta:
 
     if airborne(ball.height, ball.vz):
         # In the air: gravity, no rolling resistance; bounces on landing.
-        pos, vel, height, vz = step(ball.pos, ball.velocity, ball.height, ball.vz, friction)
+        pos, vel, height, vz = step(ball.pos, ball.velocity, ball.height, ball.vz, friction, ball.curl)
         return pos, vel, ball.state, height, vz
 
     # Constant deceleration, not proportional decay. A rolling ball loses
@@ -102,6 +102,8 @@ def apply_ball_update(ball: Ball, delta: BallDelta) -> None:
     ball.state = delta[2]
     ball.height = delta[3]
     ball.vz = delta[4]
+    if ball.height <= 0.0:
+        ball.curl = 0.0             # the grass takes the spin off it
 
 
 # Swept ball capture (see resolve_possession). A switch only for A/B

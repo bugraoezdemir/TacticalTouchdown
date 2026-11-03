@@ -40,6 +40,8 @@ from ..constants import (
     RECEPTION_GRACE_TICKS,
     RECEPTION_TAU,
     RECEPTION_FROM_FRACTION,
+    THROUGH_BEYOND_M,
+    THROUGH_SHOT_FROM_M,
     RECEPTION_HORIZON_TICKS,
     PITCH_WIDTH,
     HOLD_CONTEST_RADIUS,
@@ -64,11 +66,12 @@ from ..constants import (
 from ..constants import CONTROL_HEIGHT, CROSS_FINISH_FACTOR, GK_REACH_HEIGHT, HEADER_HEIGHT
 from ..constants import CROSS_FREE_FLOOR, CROSS_FREE_TAU
 from ..constants import CROSSBAR_HEIGHT, GOAL_BOTTOM_Y, GOAL_TOP_Y, LOFT_ANGLE_ERROR_GAIN, LOFT_SHOT_VALUE
-from ..constants import SHOT_ERROR_MAX_RAD, SHOT_LIFT_ERROR_MAX
+from ..constants import SHOT_CURL_ERROR_MAX, SHOT_ERROR_MAX_RAD, SHOT_LIFT_ERROR_MAX
 from ..constants import DIRECT_RUN_M
+from ..constants import WING_INNER_M, WING_OUTER_M, WING_TILT_GAIN
 from ..constants import IDLE_FREE_TICKS, IDLE_GAIN_MAX, IDLE_MAX_TICKS, IDLE_MIN_GAP, IDLE_PACE_SHARE
 from .. import kinematics
-from ..ball_flight import height_after, trajectory, within_reach
+from ..ball_flight import bend_start, height_after, trajectory, turned, within_reach
 from ..ball_physics import nominal_pass_speed, travel_ticks
 from ..geometry import distance, normalize
 from ..kinematics import reach_ticks
@@ -88,6 +91,7 @@ from .tunables import (
     lofted_bias,
     risk_bias,
     tempo_bias,
+    wing_attacks_bias,
     pass_range_bias,
     possession_bias,
     direct_bias,
@@ -121,6 +125,7 @@ class OnBallAction:
     receiver_id: int | None = None
     touch: float | None = None   # a dribble's solved touch length
     vz: float = 0.0              # upward launch speed of a lofted ball
+    curl: float = 0.0            # how much a bent shot turns, rad/tick
     # Where a pass is played TO (his feet, or where his run takes him); the
     # receiver times his run to it.
     pass_point: np.ndarray | None = None
@@ -217,15 +222,18 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
         else:
             cand.p = route_survival(player.pos, end, cand.speed, cand.friction, opponents)
     elif cand.kind == "shot" and cand.vz > 0.0:
-        cand.p = lofted_shot_survival(player.pos, cand.target, cand.speed, cand.vz, opponents)
+        cand.p = lofted_shot_survival(player.pos, cand.target, cand.speed, cand.vz, opponents, cand.curl)
     elif cand.vz > 0.0:
         # Lofted: only cut out where it is low enough (see lofted_survival).
+        # A through ball's too, drop and all: stopped where the race starts
+        # (_lane_end) its drop was never counted, it scored as if nobody could
+        # meet it, and 82-88% of through balls from midfield went in the air.
         cand.p = lofted_survival(player.pos, cand.target, cand.speed, cand.vz, opponents)
     elif cand.lane is not None:
         cand.p = cand.lane              # worked out with the others (_batch_lanes)
     else:
         cand.p = route_survival(
-            player.pos, cand.target, cand.speed, cand.friction, opponents,
+            player.pos, _lane_end(cand, player, state), cand.speed, cand.friction, opponents,
             is_shot=cand.kind == "shot",
             # A dribble touch stays at his feet, where a presser can tackle;
             # only a struck ball gets past the man beside him.
@@ -267,6 +275,11 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
             cand.v = shot_value(player.pos, attacking_goal_x) * SHOT_DECISIVENESS
             if cand.vz > 0.0:
                 cand.v = _on_frame(cand, player) * LOFT_SHOT_VALUE * SHOT_DECISIVENESS
+            else:
+                from .candidates import SHOT_AIM
+                if SHOT_AIM:
+                    # ...and along the ground he can miss too (_on_target).
+                    cand.p *= _on_target(cand, player)
         elif cand.is_cross:
             # A cross is worth the first-time finish it sets up: the shot from
             # the spot, through the defenders there. The pass multipliers
@@ -345,6 +358,15 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
                     # a floor: a floor gave every walk direction the same V,
                     # and he turned back and forth on the spot.
                     cand.v *= _pace.wait_gain(player, state, opponents)
+            elif THROUGH_CHANCE and _through_ball(cand, player, state):
+                # A through ball is worth the chance it makes, not the men it
+                # beats: penetration scored every ball beyond the line alike,
+                # wide or central, 25 m out or 12, and through balls were
+                # played where they led to nothing.
+                cand.v = PASS_CONTINUATION_DISCOUNT * max(
+                    position_value(cand.target, attacking_goal_x),
+                    _through_chance(cand, state, opponents, attacking_goal_x),
+                )
 
     if cand.kind == "pass" and cand.p < PASS_VIABILITY_FLOOR:
         # NOTE: an absolute floor. Weighted passes are slower and so score
@@ -389,6 +411,10 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
         tilt = direct_factor(_receiver_run(cand, player, state), direct_bias(player, team))
         cand.context *= tilt
         cand.flavour *= tilt
+        # Wing attacks: a pass to the flank against the rest (_wing_tilt).
+        tilt = _wing_tilt(cand.target, wing_attacks_bias(player, team))
+        cand.context *= tilt
+        cand.flavour *= tilt
         # Pass RANGE, the same trade applied to distance rather than flavour:
         # a ball longer than the pivot scales up as the slider rises and a
         # shorter one scales down by the reciprocal, so the team passes just as
@@ -404,8 +430,50 @@ def score_candidate(cand: Candidate, player: Player, state: GameState) -> Candid
     return cand
 
 
+def _wing_tilt(target: np.ndarray, wing: float) -> float:
+    """The Wing attacks factor for a pass to `target`: wing ** (WING_TILT_GAIN
+    x how far out on the flank it is, 0 in the middle to 1 from WING_OUTER_M).
+    1.0 at neutral and for any ball to the middle."""
+    if wing == 1.0:
+        return 1.0
+    out = abs(float(target[1]) - PITCH_WIDTH / 2.0)
+    flank = min(1.0, max(0.0, (out - WING_INNER_M) / (WING_OUTER_M - WING_INNER_M)))
+    return float(wing ** (WING_TILT_GAIN * flank)) if flank > 0.0 else 1.0
+
+
 def _normal_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _strike_sigma(player: Player) -> float:
+    """The angle error game_loop puts on his strike, as a standard deviation:
+    SHOT_ERROR_MAX_RAD by his skill, more off a fast ball
+    (FIRST_TIME_ERROR_GAIN), a header counted as at least half hard."""
+    from ..constants import FIRST_TIME_ERROR_GAIN
+    from .control import hardness
+
+    sigma = SHOT_ERROR_MAX_RAD * (1.0 - min(1.0, max(0.0, player.shooting / 100.0)))
+    if player.first_touch_speed > 0.0:
+        hard = hardness(player.first_touch_speed, player)
+        if player.first_touch_height > CONTROL_HEIGHT:
+            hard = max(hard, 0.5)
+        sigma *= 1.0 + FIRST_TIME_ERROR_GAIN * hard
+    return sigma
+
+
+def _inside_posts(origin: np.ndarray, target: np.ndarray, sigma: float) -> float:
+    """P(a ball struck from `origin` at `target` with this angle error passes
+    between the posts): the error against the angle each post stands off the
+    aim. An angle, so the same error misses by more metres from further out."""
+    if sigma <= 0.0:
+        return 1.0
+    aim = target - origin
+    bearing = math.atan2(aim[1], aim[0])
+    off = []
+    for post in (GOAL_TOP_Y, GOAL_BOTTOM_Y):
+        angle = math.atan2(post - origin[1], target[0] - origin[0]) - bearing
+        off.append(math.atan2(math.sin(angle), math.cos(angle)))
+    return _normal_cdf(max(off) / sigma) - _normal_cdf(min(off) / sigma)
 
 
 def _on_frame(cand: Candidate, player: Player) -> float:
@@ -413,21 +481,31 @@ def _on_frame(cand: Candidate, player: Player) -> float:
     and under the bar, from the errors game_loop will put on the strike. The
     aim's angle error against the angle each post stands off the aim, and the
     lift error, which grows with the ticks the ball is up, against how far the
-    bar is above it."""
+    bar is above it. A bent shot's spin error moves where it arrives by half
+    its turn x that error, which adds to the aim's. Off a fast ball the aim is
+    worse, as game_loop has it (_strike_sigma)."""
+    from .candidates import AIM_IN_THE_AIR
+
     miss = 1.0 - min(1.0, max(0.0, player.shooting / 100.0))
     if miss <= 0.0:
         return 1.0
     aim = cand.target - player.pos
-    bearing = math.atan2(aim[1], aim[0])
-    off = []
-    for post in (GOAL_TOP_Y, GOAL_BOTTOM_Y):
-        angle = math.atan2(post - player.pos[1], cand.target[0] - player.pos[0]) - bearing
-        off.append(math.atan2(math.sin(angle), math.cos(angle)))
-    sigma = SHOT_ERROR_MAX_RAD * miss * LOFT_ANGLE_ERROR_GAIN
-    wide = _normal_cdf(max(off) / sigma) - _normal_cdf(min(off) / sigma)
     ticks = float(np.linalg.norm(aim)) / cand.speed
+    angle = _strike_sigma(player) if AIM_IN_THE_AIR else SHOT_ERROR_MAX_RAD * miss
+    sigma = math.hypot(angle * LOFT_ANGLE_ERROR_GAIN,
+                       0.5 * cand.curl * ticks * SHOT_CURL_ERROR_MAX * miss)
+    wide = _inside_posts(player.pos, cand.target, sigma)
     rise = height_after(0.0, cand.vz, ticks)
     return wide * _normal_cdf((CROSSBAR_HEIGHT - rise) / (cand.vz * SHOT_LIFT_ERROR_MAX * miss * ticks))
+
+
+def _on_target(cand: Candidate, player: Player) -> float:
+    """His chance of putting this ground shot inside the posts, from the angle
+    error on his strike (_strike_sigma, _inside_posts): the same skill misses by
+    more metres from further out, and an aim nearer the post misses more often.
+    Left out, every shot was aimed 0.5 m inside a post from any range:
+    one-on-ones from 12-18 m went wide 23% of the time."""
+    return _inside_posts(player.pos, cand.target, _strike_sigma(player))
 
 
 def _receivable_pace(cand: Candidate, passer: Player, state: GameState) -> float:
@@ -759,12 +837,103 @@ def _batch_lanes(candidates: list[Candidate], player: Player, state: GameState) 
     friction = group[0].friction
     if any(c.friction != friction for c in group):
         return
+    last = _last_line(player, state)
     lanes = route_survival_many(
-        player.pos, np.array([c.target for c in group]), np.array([c.speed for c in group]),
-        friction, state.opponents_of(player.team_id),
+        player.pos, np.array([_lane_end(c, player, state, last) for c in group]),
+        np.array([c.speed for c in group]), friction, state.opponents_of(player.team_id),
     )
     for c, lane in zip(group, lanes):
         c.lane = float(lane)
+
+
+# A/B switch (on); 0 runs a through ball's lane all the way to its target.
+RUNWAY_LANE = __import__("os").environ.get("FB_RUNWAY_LANE", "1") != "0"
+# A/B switch (on); 0 values a through ball like any pass (penetration_value).
+THROUGH_CHANCE = __import__("os").environ.get("FB_THROUGH_CHANCE", "1") != "0"
+
+
+def _last_line(player: Player, state: GameState) -> float:
+    """How far up the pitch, in metres from his own goal line, the deepest
+    outfield opponent stands."""
+    direction = state.get_team(player.team_id).direction
+    return max(
+        (float(o.pos[0]) if direction == 1 else PITCH_LENGTH - float(o.pos[0]))
+        for o in state.opponents_of(player.team_id) if o.position != "GK"
+    )
+
+
+def _through_ball(cand: Candidate, player: Player, state: GameState, last: float | None = None) -> bool:
+    """A runway ball landing THROUGH_BEYOND_M or more beyond every outfield
+    opponent: the runner on the end of it is through on the keeper."""
+    if not (RUNWAY_LANE and cand.is_runway and not cand.is_cross):
+        return False
+    direction = state.get_team(player.team_id).direction
+    up = float(cand.target[0]) if direction == 1 else PITCH_LENGTH - float(cand.target[0])
+    return up > (_last_line(player, state) if last is None else last) + THROUGH_BEYOND_M
+
+
+def _through_chance(cand: Candidate, state: GameState, opponents: list[Player],
+                    attacking_goal_x: float) -> float:
+    """The shot a through ball sets up, on a shot's own terms (shot_value x
+    SHOT_DECISIVENESS, past the keeper, inside the posts): from where the
+    runner gets it, or further on as he carries it toward goal
+    (THROUGH_SHOT_FROM_M, PACE_SPRINT_FROM), each spot taken by how free he
+    still is there -- how much sooner he gets to it than the nearest outfield
+    defender (CROSS_FREE_TAU, CROSS_FREE_FLOOR). A ball that puts him in
+    alone at 14 m is a goal chance; one to the corner flag is not."""
+    from ..constants import PACE_SPRINT_FROM, SHOT_AIM_INSIDE_M
+
+    if cand.recipient_id is None:
+        return 0.0
+    runner = state.get_player(cand.recipient_id)
+    goal = np.array([attacking_goal_x, PITCH_WIDTH / 2.0])
+    to_goal = goal - cand.target
+    dist = float(np.hypot(*to_goal))
+    run = max(0.0, dist - THROUGH_SHOT_FROM_M)
+    shares = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0) if run > 0.0 else (0.0,)
+    spots = np.array([cand.target + to_goal / max(dist, 1e-9) * run * k for k in shares])
+    t_runner = float(reach_ticks(runner.pos, runner.velocity, runner.speed,
+                                 cand.target, control_radius(runner)))
+    t_runner = t_runner + np.array(shares) * run / max(PACE_SPRINT_FROM * runner.speed, 1e-9)
+    field = [o for o in opponents if o.position != "GK"]
+    keeper = [o for o in opponents if o.position == "GK"]
+    if field:
+        P = np.array([o.pos for o in field])
+        V = np.array([o.velocity for o in field])
+        tops = np.array([o.speed for o in field])
+        ctrl = np.array([control_radius(o) for o in field])
+        t_def = np.min(reach_ticks(P[None], V[None], tops[None], spots[:, None, :], ctrl[None]), axis=1)
+    else:
+        t_def = np.full(len(spots), math.inf)
+    sigma = _strike_sigma(runner)
+    best = 0.0
+    for spot, mine, theirs in zip(spots, t_runner, t_def):
+        spare = float(theirs) - float(mine)
+        if spare < 0.0 and best > 0.0:
+            break       # caught on the way: he shot before here
+        free = CROSS_FREE_FLOOR + (1.0 - CROSS_FREE_FLOOR) * (1.0 - math.exp(-max(0.0, spare) / CROSS_FREE_TAU))
+        shot = 0.0
+        for y in (GOAL_TOP_Y + SHOT_AIM_INSIDE_M, GOAL_BOTTOM_Y - SHOT_AIM_INSIDE_M):
+            aim = np.array([attacking_goal_x, y])
+            shot = max(shot, route_survival(spot, aim, SHOT_SPEED, SHOT_FRICTION_COEFF, keeper, is_shot=True)
+                       * _inside_posts(spot, aim, sigma))
+        best = max(best, shot_value(spot, attacking_goal_x) * SHOT_DECISIVENESS * shot * free)
+    return best
+
+
+def _lane_end(cand: Candidate, player: Player, state: GameState, last: float | None = None) -> np.ndarray:
+    """Where a pass's lane ends: its target, but for a through ball
+    (_through_ball) the start of the reception race (RECEPTION_FROM_FRACTION),
+    as for a cross. Run to the target, the defenders racing the runner were
+    counted twice -- in the lane and in the race: forced through balls scored
+    P 0.07 on average and reached the runner 59% of the time; with the lane
+    stopped there, 0.30, and in the right order (0.17 / 0.40 / 0.69 -> 41 /
+    79 / 80%; scratch/forced_wing_through.py). Every runway ball stopped there
+    took crosses from 51 to 6 in 16 matches: a ball from the flank into the
+    box scored as a pass beat the same ball as a cross."""
+    if _through_ball(cand, player, state, last):
+        return player.pos + (cand.target - player.pos) * RECEPTION_FROM_FRACTION
+    return cand.target
 
 
 def _first_touch_decision(
@@ -884,6 +1053,8 @@ def _action_from(best: Candidate, player: Player, state: GameState) -> OnBallAct
                             move=direction * player.speed * IDLE_PACE_SHARE)
 
     velocity = direction * best.speed
+    if best.curl != 0.0:
+        velocity = turned(velocity, bend_start(best.curl, distance(best.target, player.pos) / best.speed))
     if best.kind == "pass" and best.is_runway:
         return OnBallAction(
             "pass", velocity, best.target.copy(), best.recipient_id,
@@ -894,7 +1065,7 @@ def _action_from(best: Candidate, player: Player, state: GameState) -> OnBallAct
                         receiver_id=best.recipient_id if best.kind == "pass" else None,
                         pass_point=best.target.copy() if best.kind == "pass" else None,
                         touch=distance(best.target, player.pos) if best.kind == "dribble" else None,
-                        vz=best.vz, is_cross=best.is_cross)
+                        vz=best.vz, curl=best.curl, is_cross=best.is_cross)
 
 
 def _finisher_freedom(cand: Candidate, state: GameState, opponents: list[Player]) -> float:

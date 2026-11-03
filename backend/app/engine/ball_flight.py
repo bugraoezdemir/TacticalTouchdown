@@ -17,6 +17,13 @@ bounces -- BOUNCE_RESTITUTION of its fall back up, BOUNCE_KEEP of its pace kept
 
 Plain floats in `step`, used by the simulation itself; `trajectory` samples the
 same steps for the decision layer, so prediction and physics cannot drift.
+
+A bent ball also turns `curl` radians a tick while it is in the air, its pace
+unchanged, so it flies an arc; the first bounce ends that (physics). Nobody on
+the pitch reads the spin: `trajectory` and the keeper's crossing point go by
+the ball's flight as it is now, so they are wrong early and come right late.
+That is what makes a bent ball hard to reach. Only the man who struck it knows
+the arc (`crossing`, `arc_point`).
 """
 from __future__ import annotations
 
@@ -41,17 +48,26 @@ def airborne(height: float, vz: float) -> bool:
     return height > _EPS or vz > _EPS
 
 
+def turned(vel: np.ndarray, angle: float) -> np.ndarray:
+    """`vel` turned `angle` radians, left of travel positive."""
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([c * vel[0] - s * vel[1], s * vel[0] + c * vel[1]])
+
+
 def step(
     pos: np.ndarray,
     vel: np.ndarray,
     height: float,
     vz: float,
     friction: float,
+    curl: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
     """One tick of ball motion, in the air or along the ground."""
     if airborne(height, vz):
         vz -= BALL_GRAVITY
         height += vz
+        if curl != 0.0:
+            vel = turned(vel, curl)
         pos = pos + vel
         if height <= 0.0:
             height = 0.0
@@ -138,6 +154,44 @@ def drive_launch(dist: float, height: float, pace: float) -> tuple[float, float,
         vz0 = (height + BALL_GRAVITY * T * (T + 1.0) / 2.0) / T
         vh = math.sqrt(max(pace * pace - vz0 * vz0, 1e-9))
     return vh, vz0, dist / vh
+
+
+def bend_start(curl: float, ticks: float) -> float:
+    """How far off the straight line to its target a ball must set off, in
+    radians, to curl onto it in `ticks`: turning a little every tick before it
+    moves, its path's chord lies (ticks + 1) / 2 turns from where it started."""
+    return -curl * (ticks + 1.0) / 2.0
+
+
+def arc_point(origin: np.ndarray, target: np.ndarray, share: float, turn: float) -> np.ndarray:
+    """Where a ball from `origin` to `target` is `share` of the way along, for
+    an arc that turns `turn` radians in all, left of travel positive: on the
+    chord, off to the side by up to an eighth of its length x turn."""
+    chord = target - origin
+    bulge = 0.5 * turn * share * (1.0 - share)
+    return origin + chord * share + np.array([chord[1], -chord[0]]) * bulge
+
+
+def crossing(
+    pos: np.ndarray, vel: np.ndarray, height: float, vz: float, curl: float, goal_x: float,
+) -> tuple[float, float] | None:
+    """(y, height) where a ball in flight reaches `goal_x`, on its arc, as long
+    as it stays in the air; None if it comes down or turns back first."""
+    x, y = float(pos[0]), float(pos[1])
+    vx, vy = float(vel[0]), float(vel[1])
+    c, s = math.cos(curl), math.sin(curl)
+    side = goal_x - x
+    while (goal_x - x) * side > 0.0:
+        if vx * side <= 0.0:
+            return None
+        vz -= BALL_GRAVITY
+        height += vz
+        if height <= 0.0:
+            return None
+        vx, vy = c * vx - s * vy, s * vx + c * vy
+        x += vx
+        y += vy
+    return y, height
 
 
 def chip_launch(dist: float, height: float, angle_deg: float, pace: float) -> tuple[float, float, float] | None:

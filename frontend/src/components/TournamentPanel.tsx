@@ -50,6 +50,7 @@ const PROFILE: { key: keyof TeamTacticsDTO; label: string; title: string }[] = [
   { key: "roaming", label: "Rom", title: "Roaming" },
   { key: "pass_range", label: "Rng", title: "Pass range" },
   { key: "possession", label: "Pos", title: "Possession" },
+  { key: "wing_attacks", label: "Wng", title: "Wing attacks" },
   { key: "crossing", label: "Crs", title: "Crosses" },
   { key: "lofted", label: "Air", title: "Lofted balls" },
   { key: "risk", label: "Rsk", title: "Risk" },

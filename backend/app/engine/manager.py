@@ -164,6 +164,7 @@ PLAYER_BIAS_NAMES = (
     "bias_crossing", "bias_lofted", "bias_risk", "bias_tempo",
     "bias_press_aggression",
     "bias_man_marking",
+    "bias_wing_attacks",
 )
 
 # A brief hold when a player changes his own approach, so the change is
@@ -192,6 +193,7 @@ _SLIDER_LABELS = {
     "bias_tempo": "tempo",
     "bias_press_aggression": "press aggression",
     "bias_man_marking": "man marking",
+    "bias_wing_attacks": "wing attacks",
 }
 
 

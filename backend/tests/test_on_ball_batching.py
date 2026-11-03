@@ -28,7 +28,8 @@ def test_batched_pass_lanes_change_no_score(monkeypatch, inertia):
     for c in batched:
         if c.lane is not None:
             assert c.lane == pytest.approx(
-                route_survival(carrier.pos, c.target, c.speed, c.friction, opponents), abs=1e-9)
+                route_survival(carrier.pos, OB._lane_end(c, carrier, state), c.speed, c.friction, opponents),
+                abs=1e-9)
             checked += 1
     assert checked > 0
 
